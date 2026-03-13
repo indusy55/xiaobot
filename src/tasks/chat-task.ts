@@ -406,6 +406,8 @@ export class ChatTask extends BaseTask {
     } catch (error) {
       if (await this.cancellationRequested()) {
         await streamer.cancel("Task cancelled.");
+      } else if (this.isTimedOut()) {
+        await streamer.fail("Task timed out.");
       } else {
         await streamer.fail("Task failed.");
       }

@@ -68,6 +68,21 @@ const envSchema = z.object({
     },
     z.string().url("OPENAI_BASE_URL must be a valid URL").optional()
   ),
+  TASK_TIMEOUT_MS: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("TASK_TIMEOUT_MS must be an integer")
+      .positive("TASK_TIMEOUT_MS must be greater than 0")
+      .default(120_000)
+  ),
 });
 
 export type Env = z.infer<typeof envSchema>;

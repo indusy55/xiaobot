@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { botCommands } from "./bot/commands.js";
 import { setupHandlers } from "./bot/handlers/index.js";
 import { setupMessageLoggerMiddleware } from "./bot/middleware/message-logger.js";
 import { setupMessagePersistenceMiddleware } from "./bot/middleware/message-persistence.js";
@@ -20,6 +21,7 @@ function main() {
 			api: bot.api,
 			chatModel,
 			decisionModel,
+			taskTimeoutMs: cfg.TASK_TIMEOUT_MS,
 			taskRuntime: {
 				enqueueChatTask,
 				requestCancelLatest: (scope) => taskWorker.requestCancelLatest(scope),
@@ -28,7 +30,7 @@ function main() {
 
 		setupMessagePersistenceMiddleware(bot);
 		setupMessageLoggerMiddleware(bot);
-		setupHandlers(bot, taskWorker);
+		setupHandlers(bot, taskWorker, chatModel);
 		taskWorker.startPolling();
 
 		bot.catch((err) => {
@@ -40,7 +42,8 @@ function main() {
 		});
 
 		bot.start({
-			onStart: (botInfo) => {
+			onStart: async (botInfo) => {
+				await bot.api.setMyCommands(botCommands);
 				logger.info(`Bot [${botInfo.username}] started`);
 			},
 		});

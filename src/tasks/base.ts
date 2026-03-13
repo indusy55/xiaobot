@@ -41,6 +41,8 @@ function buildThreadScopeCondition(threadId?: number) {
 }
 
 export abstract class BaseTask {
+  private timedOut = false;
+
   constructor(
     protected task: TaskRecord,
     protected readonly dependencies: TaskDependencies
@@ -61,10 +63,20 @@ export abstract class BaseTask {
     }
 
     const controller = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(this.dependencies.taskTimeoutMs);
+    const signal = AbortSignal.any([controller.signal, timeoutSignal]);
+    this.timedOut = false;
+    timeoutSignal.addEventListener(
+      "abort",
+      () => {
+        this.timedOut = true;
+      },
+      { once: true }
+    );
 
     try {
       await this.throwIfCancellationRequested();
-      const result = await this.execute(controller.signal);
+      const result = await this.execute(signal);
       await this.throwIfCancellationRequested();
       await this.transitionTo("completed", {
         result: result === undefined ? null : JSON.stringify(result),
@@ -76,11 +88,19 @@ export abstract class BaseTask {
         return;
       }
 
+      const normalizedError = this.timedOut
+        ? new Error(`Task timed out after ${this.dependencies.taskTimeoutMs}ms`)
+        : error;
+
       await this.transitionTo("failed", {
         errorMessage:
-          error instanceof Error ? error.message : "Unknown task error",
+          normalizedError instanceof Error
+            ? normalizedError.message
+            : "Unknown task error",
       });
-      throw error;
+      throw normalizedError;
+    } finally {
+      controller.abort();
     }
   }
 
@@ -165,6 +185,10 @@ export abstract class BaseTask {
 
   protected async cancellationRequested() {
     return this.isCancellationRequested();
+  }
+
+  protected isTimedOut() {
+    return this.timedOut;
   }
 
   protected async reload() {

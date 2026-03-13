@@ -80,6 +80,7 @@ export interface TaskDependencies {
   chatModel: ChatOpenAI;
   decisionModel: ChatOpenAI;
   taskRuntime: TaskRuntime;
+  taskTimeoutMs: number;
 }
 
 export interface CancelTaskScope {
