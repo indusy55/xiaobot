@@ -1,7 +1,11 @@
-import { and, asc, desc, eq, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, or } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { messagesTable, tasksTable } from "../db/schema.js";
-import { getAnchorMessageId } from "../bot/conversation.js";
+import {
+  getAnchorMessageId,
+  listConversationFamilyIds,
+} from "../bot/conversation.js";
+import { assembleBranchAwareContext } from "./context-window.js";
 import type {
   TaskContextMessage,
   TaskDependencies,
@@ -44,13 +48,32 @@ function buildThreadScopeCondition(threadId?: number) {
     : eq(messagesTable.threadId, threadId);
 }
 
+function buildConversationFamilyCondition(conversationId: string) {
+  const familyIds = listConversationFamilyIds(conversationId);
+
+  return familyIds.length === 1
+    ? eq(messagesTable.conversationId, familyIds[0] as string)
+    : inArray(messagesTable.conversationId, familyIds as string[]);
+}
+
+function buildTaskConversationFamilyCondition(conversationId: string) {
+  const familyIds = listConversationFamilyIds(conversationId);
+
+  return familyIds.length === 1
+    ? eq(tasksTable.conversationId, familyIds[0] as string)
+    : inArray(tasksTable.conversationId, familyIds as string[]);
+}
+
 export abstract class BaseTask {
   private timedOut = false;
+  private readonly expectedWorkerOwner: string | null;
 
   constructor(
     protected task: TaskRecord,
     protected readonly dependencies: TaskDependencies
-  ) {}
+  ) {
+    this.expectedWorkerOwner = task.workerOwner;
+  }
 
   get record() {
     return this.task;
@@ -137,43 +160,30 @@ export abstract class BaseTask {
         .limit(1);
 
       if (triggerRow) {
-        const collected: TaskContextMessage[] = [];
-        const visited = new Set<number>();
-        let currentRow = triggerRow as TaskContextMessage;
+        const conversationRows = await db
+          .select(taskContextMessageSelection)
+          .from(messagesTable)
+          .where(
+            and(
+              buildConversationFamilyCondition(this.task.conversationId),
+              eq(messagesTable.chatId, this.task.chatId),
+              or(
+                lt(messagesTable.createdAt, triggerRow.createdAt),
+                and(
+                  eq(messagesTable.createdAt, triggerRow.createdAt),
+                  lte(messagesTable.id, triggerRow.id)
+                )
+              )
+            )
+          )
+          .orderBy(asc(messagesTable.createdAt), asc(messagesTable.id));
 
-        while (
-          currentRow &&
-          collected.length < limit &&
-          !visited.has(currentRow.id)
-        ) {
-          collected.push(currentRow);
-          visited.add(currentRow.id);
-
-          if (
-            anchorMessageId != null &&
-            currentRow.telegramMessageId === anchorMessageId
-          ) {
-            break;
-          }
-
-          if (currentRow.parentMessageId == null) {
-            break;
-          }
-
-          const [parentRow] = await db
-            .select(taskContextMessageSelection)
-            .from(messagesTable)
-            .where(eq(messagesTable.id, currentRow.parentMessageId))
-            .limit(1);
-
-          if (!parentRow) {
-            break;
-          }
-
-          currentRow = parentRow as TaskContextMessage;
-        }
-
-        return collected.reverse();
+        return assembleBranchAwareContext({
+          conversationMessages: conversationRows as TaskContextMessage[],
+          triggerTelegramMessageId,
+          limit,
+          anchorMessageId,
+        });
       }
     }
     const conversationRows = await db
@@ -181,11 +191,11 @@ export abstract class BaseTask {
       .from(messagesTable)
       .where(
         and(
-          eq(messagesTable.conversationId, this.task.conversationId),
+          buildConversationFamilyCondition(this.task.conversationId),
           eq(messagesTable.chatId, this.task.chatId)
         )
       )
-      .orderBy(desc(messagesTable.createdAt))
+      .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
       .limit(anchorMessageId == null ? limit : Math.max(limit - 1, 0));
 
     if (anchorMessageId == null) {
@@ -232,7 +242,7 @@ export abstract class BaseTask {
           buildThreadScopeCondition(threadId)
         )
       )
-      .orderBy(desc(messagesTable.createdAt))
+      .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
       .limit(limit);
 
     return rows.reverse();
@@ -251,7 +261,7 @@ export abstract class BaseTask {
       .from(messagesTable)
       .where(
         and(
-          eq(messagesTable.conversationId, this.task.conversationId),
+          buildConversationFamilyCondition(this.task.conversationId),
           eq(messagesTable.chatId, this.task.chatId),
           lt(messagesTable.createdAt, beforeCreatedAt)
         )
@@ -277,7 +287,7 @@ export abstract class BaseTask {
       .from(tasksTable)
       .where(
         and(
-          eq(tasksTable.conversationId, this.task.conversationId),
+          buildTaskConversationFamilyCondition(this.task.conversationId),
           eq(tasksTable.chatId, this.task.chatId),
           lt(tasksTable.createdAt, this.task.createdAt)
         )
@@ -328,17 +338,20 @@ export abstract class BaseTask {
   }
 
   protected async reload() {
+    const currentTaskId = this.task.id;
     const [task] = await db
       .select()
       .from(tasksTable)
-      .where(eq(tasksTable.id, this.task.id))
+      .where(eq(tasksTable.id, currentTaskId))
       .limit(1);
 
     if (!task) {
-      throw new Error(`Task ${this.task.id} not found`);
+      throw new Error(`Task ${currentTaskId} not found`);
     }
 
-    this.task = task as TaskRecord;
+    const nextTask = task as TaskRecord;
+    this.assertTaskOwnership(nextTask);
+    this.task = nextTask;
     return this.task;
   }
 
@@ -369,12 +382,22 @@ export abstract class BaseTask {
 
     if (["completed", "cancelled", "failed"].includes(nextStatus)) {
       updates.finishedAt = now;
+      updates.workerOwner = null;
+      updates.leaseExpiresAt = null;
     }
 
     await db
       .update(tasksTable)
       .set(updates)
-      .where(and(eq(tasksTable.id, current.id), eq(tasksTable.status, current.status)));
+      .where(
+        and(
+          eq(tasksTable.id, current.id),
+          eq(tasksTable.status, current.status),
+          current.workerOwner == null
+            ? isNull(tasksTable.workerOwner)
+            : eq(tasksTable.workerOwner, current.workerOwner)
+        )
+      );
 
     return this.reload();
   }
@@ -388,7 +411,14 @@ export abstract class BaseTask {
         ...extra,
         updatedAt: Date.now(),
       })
-      .where(eq(tasksTable.id, this.task.id));
+      .where(
+        and(
+          eq(tasksTable.id, this.task.id),
+          this.task.workerOwner == null
+            ? isNull(tasksTable.workerOwner)
+            : eq(tasksTable.workerOwner, this.task.workerOwner)
+        )
+      );
 
     return this.reload();
   }
@@ -396,5 +426,24 @@ export abstract class BaseTask {
   private async isCancellationRequested() {
     const current = await this.reload();
     return current.status === "cancelling" || current.cancelRequestedAt != null;
+  }
+
+  private assertTaskOwnership(task: TaskRecord) {
+    if (this.expectedWorkerOwner == null) {
+      return;
+    }
+
+    if (
+      task.workerOwner == null &&
+      ["completed", "cancelled", "failed"].includes(task.status)
+    ) {
+      return;
+    }
+
+    if (task.workerOwner !== this.expectedWorkerOwner) {
+      throw new Error(
+        `Task ${task.id} lease ownership changed from ${this.expectedWorkerOwner} to ${task.workerOwner}`
+      );
+    }
   }
 }

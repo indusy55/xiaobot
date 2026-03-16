@@ -43,6 +43,13 @@
       "when": 1773647985053,
       "tag": "0005_safe_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1773653172175,
+      "tag": "0006_fair_mikhail_rasputin",
+      "breakpoints": true
     }
   ]
 }

@@ -205,6 +205,22 @@ const envSchema = z.object({
       .max(30, "CHAT_CONTEXT_SUMMARY_LIMIT must be at most 30")
       .default(10)
   ),
+  CHAT_MEDIA_CONTEXT_LIMIT: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("CHAT_MEDIA_CONTEXT_LIMIT must be an integer")
+      .min(0, "CHAT_MEDIA_CONTEXT_LIMIT must be at least 0")
+      .max(12, "CHAT_MEDIA_CONTEXT_LIMIT must be at most 12")
+      .default(3)
+  ),
   WEB_SEARCH_TIMEOUT_MS: z.preprocess(
     (value) => {
       if (typeof value !== "string" || value.trim().length === 0) {

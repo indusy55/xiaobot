@@ -29,6 +29,7 @@ function main() {
 			chatDecisionTimeoutMs: cfg.CHAT_DECISION_TIMEOUT_MS,
 			chatContextLimit: cfg.CHAT_CONTEXT_LIMIT,
 			chatContextSummaryLimit: cfg.CHAT_CONTEXT_SUMMARY_LIMIT,
+			chatMediaContextLimit: cfg.CHAT_MEDIA_CONTEXT_LIMIT,
 			telegramMediaCacheDir: cfg.TELEGRAM_MEDIA_CACHE_DIR,
 			taskRuntime: {
 				enqueueChatTask,

@@ -1,5 +1,6 @@
 import {
   assignConversationIdToMessage,
+  resolveBranchReferenceTelegramMessageId,
   updateMessageContextLinks,
 } from "../bot/conversation-store.js";
 import {
@@ -60,6 +61,8 @@ export class ChatResponseDelivery {
     private readonly options: {
       threadId?: number;
       replyParameters?: ReplyParameters | null;
+      contextParentTelegramMessageId?: number | null;
+      contextReferenceTelegramMessageId?: number | null;
     } = {}
   ) {
     this.streamer = new TelegramMessageStreamer(this.dependencies.api, {
@@ -90,10 +93,33 @@ export class ChatResponseDelivery {
     return this.streamer.state;
   }
 
+  private async resolveTriggerBranchReferenceTelegramMessageId() {
+    if (this.options.contextReferenceTelegramMessageId != null) {
+      return this.options.contextReferenceTelegramMessageId;
+    }
+
+    if (this.record.triggerTelegramMessageId == null) {
+      return null;
+    }
+
+    return resolveBranchReferenceTelegramMessageId({
+      chatId: this.record.chatId,
+      telegramMessageId: this.record.triggerTelegramMessageId,
+      ...(this.options.threadId == null
+        ? {}
+        : { threadId: this.options.threadId }),
+    }).catch(() => this.record.triggerTelegramMessageId);
+  }
+
   async start(conversationId: string) {
     await this.streamer.start();
 
     if (this.streamer.state?.messageId != null) {
+      const referenceTelegramMessageId =
+        await this.resolveTriggerBranchReferenceTelegramMessageId();
+      const contextParentTelegramMessageId =
+        this.options.contextParentTelegramMessageId ??
+        this.record.triggerTelegramMessageId;
       await assignConversationIdToMessage(
         this.record.chatId,
         this.streamer.state.messageId,
@@ -107,8 +133,8 @@ export class ChatResponseDelivery {
         ...(this.options.threadId == null
           ? {}
           : { threadId: this.options.threadId }),
-        parentTelegramMessageId: this.record.triggerTelegramMessageId,
-        referenceTelegramMessageId: this.record.triggerTelegramMessageId,
+        parentTelegramMessageId: contextParentTelegramMessageId,
+        referenceTelegramMessageId,
       });
     }
 
@@ -138,6 +164,8 @@ export class ChatResponseDelivery {
     });
 
     await this.streamer.complete();
+    const referenceTelegramMessageId =
+      await this.resolveTriggerBranchReferenceTelegramMessageId();
 
     let previousMessageId = delivery.primaryMessageId ?? null;
 
@@ -156,7 +184,7 @@ export class ChatResponseDelivery {
           ? {}
           : { threadId: this.options.threadId }),
         parentTelegramMessageId: previousMessageId,
-        referenceTelegramMessageId: this.record.triggerTelegramMessageId,
+        referenceTelegramMessageId,
       });
       previousMessageId = messageId;
     }
@@ -197,6 +225,11 @@ export class ChatResponseDelivery {
       options.conversationId,
       this.options.threadId
     );
+    const referenceTelegramMessageId =
+      await this.resolveTriggerBranchReferenceTelegramMessageId();
+    const contextParentTelegramMessageId =
+      this.options.contextParentTelegramMessageId ??
+      this.record.triggerTelegramMessageId;
     await updateMessageContextLinks({
       chatId: this.record.chatId,
       telegramMessageId: message.message_id,
@@ -204,8 +237,8 @@ export class ChatResponseDelivery {
       ...(this.options.threadId == null
         ? {}
         : { threadId: this.options.threadId }),
-      parentTelegramMessageId: this.record.triggerTelegramMessageId,
-      referenceTelegramMessageId: this.record.triggerTelegramMessageId,
+      parentTelegramMessageId: contextParentTelegramMessageId,
+      referenceTelegramMessageId,
     });
 
     return message;
@@ -235,6 +268,8 @@ export class ChatResponseDelivery {
       options.conversationId,
       this.options.threadId
     );
+    const referenceTelegramMessageId =
+      await this.resolveTriggerBranchReferenceTelegramMessageId();
     await updateMessageContextLinks({
       chatId: this.record.chatId,
       telegramMessageId: message.message_id,
@@ -243,7 +278,7 @@ export class ChatResponseDelivery {
         ? {}
         : { threadId: this.options.threadId }),
       parentTelegramMessageId: options.parentTelegramMessageId,
-      referenceTelegramMessageId: this.record.triggerTelegramMessageId,
+      referenceTelegramMessageId,
     });
 
     return message;

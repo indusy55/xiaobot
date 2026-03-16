@@ -10,12 +10,26 @@ type ModelImagePart = {
   };
 };
 
+export interface TelegramMediaSummary {
+  kind: "photo" | "sticker";
+  summary: string;
+  emoji?: string;
+}
+
 type MediaReference = {
   fileId: string;
   fileUniqueId: string;
   kind: "photo" | "sticker";
   emoji?: string;
 };
+
+const dataUrlCache = new Map<string, string>();
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("This operation was aborted", "AbortError");
+  }
+}
 
 function asEntity(value: unknown) {
   return typeof value === "object" && value !== null
@@ -153,6 +167,74 @@ function getMediaReference(rawMessage: string, contentType: string) {
   }
 }
 
+export function summarizeTelegramMessageMedia(options: {
+  rawMessage: string | null;
+  contentType: string;
+}): TelegramMediaSummary | null {
+  const { rawMessage, contentType } = options;
+  if (!rawMessage) {
+    return null;
+  }
+
+  const message = unwrapStoredMessage(rawMessage);
+  if (!message) {
+    return null;
+  }
+
+  if (contentType === "photo") {
+    const photos = asEntities(message.photo);
+    const largestPhoto = photos
+      .slice()
+      .sort((left, right) => {
+        const leftArea =
+          (getNumberValue(left.width) ?? 0) * (getNumberValue(left.height) ?? 0);
+        const rightArea =
+          (getNumberValue(right.width) ?? 0) * (getNumberValue(right.height) ?? 0);
+
+        if (rightArea !== leftArea) {
+          return rightArea - leftArea;
+        }
+
+        return (getNumberValue(right.file_size) ?? 0) -
+          (getNumberValue(left.file_size) ?? 0);
+      })[0];
+    const width = getNumberValue(largestPhoto?.width);
+    const height = getNumberValue(largestPhoto?.height);
+    const dimensionText =
+      width && height ? ` Largest size is ${width}x${height}.` : "";
+    const variantText = photos.length > 1 ? ` ${photos.length} sizes available.` : "";
+
+    return {
+      kind: "photo",
+      summary: `Photo attached.${dimensionText}${variantText}`.trim(),
+    };
+  }
+
+  if (contentType === "sticker") {
+    const sticker = asEntity(message.sticker);
+    if (!sticker) {
+      return null;
+    }
+
+    const emoji = getStringValue(sticker.emoji);
+    const isAnimated = getBooleanValue(sticker.is_animated) ?? false;
+    const isVideo = getBooleanValue(sticker.is_video) ?? false;
+    const stickerMode = isVideo
+      ? "Video sticker"
+      : isAnimated
+        ? "Animated sticker"
+        : "Sticker";
+
+    return {
+      kind: "sticker",
+      summary: `${stickerMode}${emoji ? ` ${emoji}` : ""}.`,
+      ...(emoji ? { emoji } : {}),
+    };
+  }
+
+  return null;
+}
+
 function inferMimeType(filePath: string, kind: "photo" | "sticker") {
   const extension = extname(filePath).toLowerCase();
 
@@ -177,7 +259,8 @@ async function ensureCachedTelegramFile(options: {
   media: MediaReference;
   signal?: AbortSignal;
 }) {
-  const { api, cacheDir, media } = options;
+  const { api, cacheDir, media, signal } = options;
+  throwIfAborted(signal);
   const telegramFile = await api.getFile(media.fileId);
   if (!telegramFile.file_path) {
     return null;
@@ -199,8 +282,10 @@ async function ensureCachedTelegramFile(options: {
     // Cache miss.
   }
 
+  throwIfAborted(signal);
   await mkdir(targetDir, { recursive: true });
   const downloadedPath = await telegramFile.download(targetPath);
+  throwIfAborted(signal);
 
   return {
     path: downloadedPath,
@@ -208,9 +293,19 @@ async function ensureCachedTelegramFile(options: {
   };
 }
 
-async function toDataUrl(path: string, mimeType: string) {
+async function toDataUrl(path: string, mimeType: string, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  const cacheKey = `${mimeType}:${path}`;
+  const cachedValue = dataUrlCache.get(cacheKey);
+  if (cachedValue) {
+    return cachedValue;
+  }
+
   const fileBuffer = await readFile(path);
-  return `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
+  throwIfAborted(signal);
+  const dataUrl = `data:${mimeType};base64,${fileBuffer.toString("base64")}`;
+  dataUrlCache.set(cacheKey, dataUrl);
+  return dataUrl;
 }
 
 export async function resolveTelegramMessageImagePart(options: {
@@ -221,6 +316,7 @@ export async function resolveTelegramMessageImagePart(options: {
   signal?: AbortSignal;
 }): Promise<(ModelImagePart & { emoji?: string }) | null> {
   const { api, cacheDir, rawMessage, contentType, signal } = options;
+  throwIfAborted(signal);
   if (!rawMessage) {
     return null;
   }
@@ -240,7 +336,7 @@ export async function resolveTelegramMessageImagePart(options: {
     return null;
   }
 
-  const dataUrl = await toDataUrl(cachedFile.path, cachedFile.mimeType);
+  const dataUrl = await toDataUrl(cachedFile.path, cachedFile.mimeType, signal);
   return {
     type: "image_url",
     image_url: {

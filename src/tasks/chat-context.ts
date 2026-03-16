@@ -7,7 +7,10 @@ import {
 import { extractMessageQuote } from "../bot/message-quote.js";
 import type { ResearchObservationNote } from "../infra/ai/research-loop.js";
 import { formatMessageSpeakerPrefix } from "../infra/ai/runtime-context.js";
-import { resolveTelegramMessageImagePart } from "../infra/media/telegram-media.js";
+import {
+  resolveTelegramMessageImagePart,
+  summarizeTelegramMessageMedia,
+} from "../infra/media/telegram-media.js";
 import { type WebSearchContext } from "../infra/search/searxng.js";
 import { formatWebSearchPrompt } from "../infra/tools/web-search.js";
 import type { ChatTaskPayload, TaskContextMessage, TaskDependencies } from "./types.js";
@@ -25,36 +28,70 @@ export interface ChatToolObservationRecord {
   source: "current_turn" | "snapshot";
 }
 
-function toModelMessageContent(message: {
-  contentType: string;
-  textContent: string | null;
-}) {
-  if (
-    typeof message.textContent === "string" &&
-    message.textContent.trim().length > 0
-  ) {
-    return message.textContent;
+export interface ChatTaskSnapshotRecord {
+  status: string;
+  contextSnapshot: string | null;
+  createdAt: number;
+}
+
+const SNAPSHOT_WEB_SEARCH_TTL_MS = 15 * 60 * 1000;
+const MAX_REUSED_TOOL_OBSERVATIONS = 2;
+const MEDIA_CONTENT_TYPES = new Set(["photo", "sticker"]);
+
+function cleanTextContent(textContent: string | null) {
+  if (typeof textContent !== "string") {
+    return null;
   }
 
-  return `[${message.contentType}]`;
+  const trimmed = textContent.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildModelMessageContent(message: TaskContextMessage) {
+  const textContent = cleanTextContent(message.textContent);
+  const mediaSummary = summarizeTelegramMessageMedia({
+    rawMessage: message.rawMessage,
+    contentType: message.contentType,
+  });
+
+  if (mediaSummary == null) {
+    return textContent ?? `[${message.contentType}]`;
+  }
+
+  if (textContent == null) {
+    return mediaSummary.summary;
+  }
+
+  if (
+    mediaSummary.kind === "sticker" &&
+    mediaSummary.emoji != null &&
+    textContent === mediaSummary.emoji
+  ) {
+    return mediaSummary.summary;
+  }
+
+  return `${textContent}\n${mediaSummary.summary}`;
 }
 
 async function toUserMessageContent(
   dependencies: Pick<TaskDependencies, "api" | "telegramMediaCacheDir">,
   message: TaskContextMessage,
-  signal: AbortSignal
+  signal: AbortSignal,
+  includeMedia: boolean
 ) {
-  const content = toModelMessageContent(message);
+  const content = buildModelMessageContent(message);
   const speakerPrefix = formatMessageSpeakerPrefix(message);
   const finalUserContent =
     speakerPrefix == null ? content : `${speakerPrefix}: ${content}`;
-  const imagePart = await resolveTelegramMessageImagePart({
-    api: dependencies.api,
-    cacheDir: dependencies.telegramMediaCacheDir,
-    rawMessage: message.rawMessage,
-    contentType: message.contentType,
-    signal,
-  }).catch(() => null);
+  const imagePart = includeMedia
+    ? await resolveTelegramMessageImagePart({
+        api: dependencies.api,
+        cacheDir: dependencies.telegramMediaCacheDir,
+        rawMessage: message.rawMessage,
+        contentType: message.contentType,
+        signal,
+      }).catch(() => null)
+    : null;
   const quote = extractMessageQuote(message.rawMessage);
   const quoteLine = quote == null ? null : `Quoted part: "${quote.text}"`;
   const textParts: { type: "text"; text: string }[] = [
@@ -179,40 +216,109 @@ export function buildLatestUserInputContext(options: {
   };
 }
 
-export async function buildChatModelMessages(options: {
-  dependencies: Pick<TaskDependencies, "api" | "telegramMediaCacheDir">;
+export function selectMediaMessageIdsForModelInput(options: {
   contextMessages: TaskContextMessage[];
-  signal: AbortSignal;
-}): Promise<BaseMessage[]> {
-  const messages: BaseMessage[] = [];
+  triggerTelegramMessageId: number | null;
+  repliedTelegramMessageId: number | null;
+  maxMediaMessages: number;
+}) {
+  const {
+    contextMessages,
+    triggerTelegramMessageId,
+    repliedTelegramMessageId,
+    maxMediaMessages,
+  } = options;
 
-  for (const message of options.contextMessages) {
-    const content = toModelMessageContent(message);
+  if (maxMediaMessages <= 0) {
+    return new Set<number>();
+  }
 
-    switch (message.role) {
-      case "assistant":
-        messages.push(new AIMessage(content));
-        break;
-      case "system":
-        messages.push(new SystemMessage(content));
-        break;
-      case "tool":
-        messages.push(new SystemMessage(`Tool output: ${content}`));
-        break;
-      case "user":
-      default: {
-        const userContent = await toUserMessageContent(
-          options.dependencies,
-          message,
-          options.signal
-        );
-        messages.push(new HumanMessage(userContent));
-        break;
-      }
+  const candidates = contextMessages.filter(
+    (message) =>
+      message.role === "user" &&
+      message.telegramMessageId != null &&
+      MEDIA_CONTENT_TYPES.has(message.contentType)
+  );
+  if (candidates.length === 0) {
+    return new Set<number>();
+  }
+
+  const selectedIds = new Set<number>();
+  const prioritizedIds = [triggerTelegramMessageId, repliedTelegramMessageId].filter(
+    (value): value is number => value != null
+  );
+
+  for (const telegramMessageId of prioritizedIds) {
+    const candidate = candidates.find(
+      (message) => message.telegramMessageId === telegramMessageId
+    );
+    if (!candidate) {
+      continue;
+    }
+
+    selectedIds.add(telegramMessageId);
+    if (selectedIds.size >= maxMediaMessages) {
+      return selectedIds;
     }
   }
 
-  return messages;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (!candidate?.telegramMessageId) {
+      continue;
+    }
+
+    selectedIds.add(candidate.telegramMessageId);
+    if (selectedIds.size >= maxMediaMessages) {
+      break;
+    }
+  }
+
+  return selectedIds;
+}
+
+export async function buildChatModelMessages(options: {
+  dependencies: Pick<
+    TaskDependencies,
+    "api" | "telegramMediaCacheDir" | "chatMediaContextLimit"
+  >;
+  contextMessages: TaskContextMessage[];
+  signal: AbortSignal;
+  triggerTelegramMessageId: number | null;
+  repliedTelegramMessageId: number | null;
+}): Promise<BaseMessage[]> {
+  const mediaMessageIds = selectMediaMessageIdsForModelInput({
+    contextMessages: options.contextMessages,
+    triggerTelegramMessageId: options.triggerTelegramMessageId,
+    repliedTelegramMessageId: options.repliedTelegramMessageId,
+    maxMediaMessages: options.dependencies.chatMediaContextLimit,
+  });
+
+  return Promise.all(
+    options.contextMessages.map(async (message) => {
+      const content = buildModelMessageContent(message);
+
+      switch (message.role) {
+        case "assistant":
+          return new AIMessage(content);
+        case "system":
+          return new SystemMessage(content);
+        case "tool":
+          return new SystemMessage(`Tool output: ${content}`);
+        case "user":
+        default: {
+          const userContent = await toUserMessageContent(
+            options.dependencies,
+            message,
+            options.signal,
+            message.telegramMessageId != null &&
+              mediaMessageIds.has(message.telegramMessageId)
+          );
+          return new HumanMessage(userContent);
+        }
+      }
+    })
+  );
 }
 
 export function extractToolObservationsFromSnapshot(snapshot: string | null) {
@@ -258,6 +364,48 @@ export function extractToolObservationsFromSnapshot(snapshot: string | null) {
   } catch {
     return [] as ChatToolObservationRecord[];
   }
+}
+
+export function collectReusableToolObservations(
+  snapshots: ChatTaskSnapshotRecord[],
+  now = Date.now()
+) {
+  const collected: ChatToolObservationRecord[] = [];
+  const seenSearchQueries = new Set<string>();
+
+  for (const snapshot of snapshots) {
+    if (snapshot.status !== "completed") {
+      continue;
+    }
+
+    if (now - snapshot.createdAt > SNAPSHOT_WEB_SEARCH_TTL_MS) {
+      continue;
+    }
+
+    const observations = extractToolObservationsFromSnapshot(
+      snapshot.contextSnapshot
+    );
+
+    for (const observation of observations) {
+      if (observation.type !== "web_search" || observation.context == null) {
+        continue;
+      }
+
+      const query = observation.context.query.trim().toLowerCase();
+      if (query.length === 0 || seenSearchQueries.has(query)) {
+        continue;
+      }
+
+      seenSearchQueries.add(query);
+      collected.push(observation);
+
+      if (collected.length >= MAX_REUSED_TOOL_OBSERVATIONS) {
+        return collected;
+      }
+    }
+  }
+
+  return collected;
 }
 
 export function buildResearchObservationNotes(

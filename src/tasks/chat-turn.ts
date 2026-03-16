@@ -3,9 +3,10 @@ import { buildRuntimeContextPrompt } from "../infra/ai/runtime-context.js";
 import {
   applyChatUserInputOverride,
   buildLatestUserInputContext,
-  extractToolObservationsFromSnapshot,
+  collectReusableToolObservations,
   findChatTriggerMessage,
   type ChatLatestUserInputContext,
+  type ChatTaskSnapshotRecord,
   type ChatToolObservationRecord,
 } from "./chat-context.js";
 import type { ChatTaskPayload, TaskContextMessage } from "./types.js";
@@ -43,7 +44,7 @@ export async function prepareChatTurn(options: {
   ) => Promise<TaskContextMessage | null>;
   loadRecentConversationTaskSnapshots: (
     limit: number
-  ) => Promise<{ contextSnapshot: string | null }[]>;
+  ) => Promise<ChatTaskSnapshotRecord[]>;
 }) {
   const {
     payload,
@@ -97,8 +98,8 @@ export async function prepareChatTurn(options: {
     olderConversationMessages
   );
   const recentTaskSnapshots = await loadRecentConversationTaskSnapshots(4);
-  const priorToolObservations = recentTaskSnapshots.flatMap((snapshot) =>
-    extractToolObservationsFromSnapshot(snapshot.contextSnapshot)
+  const priorToolObservations = collectReusableToolObservations(
+    recentTaskSnapshots
   );
 
   return {

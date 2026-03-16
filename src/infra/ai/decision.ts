@@ -54,6 +54,7 @@ export const chatDecisionSchema = z.object({
     .array(z.discriminatedUnion("type", [cancelTaskActionSchema, enqueueTaskActionSchema]))
     .max(3),
   responseBrief: z.string().max(500),
+  responseText: z.string().max(12000),
   decisionNote: z.string().max(300),
 });
 
@@ -71,8 +72,11 @@ export interface ChatDecisionStickerCandidate {
 
 interface BuildDecisionMessagesOptions {
   runtimeContextPrompt: string;
+  systemPrompt?: string;
+  inputEnvelopePrompt?: string;
   conversationId: string;
   conversationMessages: TaskContextMessage[];
+  contextModelMessages?: BaseMessage[];
   recentChatMessages: TaskContextMessage[];
   triggerMessage: TaskContextMessage | null;
   repliedMessage: TaskContextMessage | null;
@@ -98,6 +102,12 @@ const CHAT_DECISION_SYSTEM_PROMPT = [
   "Base the decision on the latest request and the provided chat context.",
   "Be conservative in group chats and practical in private chats.",
   "Do not invent message ids or user ids.",
+  "Use the exact enum values from the schema. Do not output aliases, translations, or prose in enum fields.",
+  "responseText must be the exact final user-facing text to send.",
+  "If action is ignore, responseText must be an empty string.",
+  "If responseMode is sticker_only, responseText must be an empty string.",
+  "If responseMode is text_with_sticker, responseText must contain only the text message. The runtime sends the sticker separately.",
+  "Do not output placeholders such as [sticker], [贴纸], [image], or [photo].",
   "Return exactly one JSON object with these fields:",
   "- action",
   "- responseMode",
@@ -108,6 +118,7 @@ const CHAT_DECISION_SYSTEM_PROMPT = [
   "- conversation",
   "- taskActions",
   "- responseBrief",
+  "- responseText",
   "- decisionNote",
 ].join("\n");
 
@@ -251,6 +262,36 @@ function sanitizeResponseMode(
   return "text_with_sticker" as const;
 }
 
+function isPlaceholderResponseText(text: string) {
+  return /^\[(sticker|贴纸|image|photo|图片)\]$/iu.test(text.trim());
+}
+
+function sanitizeResponseText(options: {
+  action: ChatDecision["action"];
+  responseMode: ChatDecision["responseMode"];
+  responseText: string;
+  responseBrief: string;
+}) {
+  if (
+    options.action === "ignore" ||
+    options.responseMode === "sticker_only"
+  ) {
+    return "";
+  }
+
+  const primaryText = options.responseText.trim();
+  if (primaryText.length > 0 && !isPlaceholderResponseText(primaryText)) {
+    return primaryText;
+  }
+
+  const briefText = options.responseBrief.trim();
+  if (briefText.length > 0 && !isPlaceholderResponseText(briefText)) {
+    return briefText;
+  }
+
+  return "I could not generate a response.";
+}
+
 function sanitizeConversationMode(
   conversation: ChatDecision["conversation"],
   options: SanitizeDecisionOptions,
@@ -326,8 +367,11 @@ export function buildChatDecisionMessages(
 ): BaseMessage[] {
   const {
     runtimeContextPrompt,
+    systemPrompt,
+    inputEnvelopePrompt,
     conversationId,
     conversationMessages,
+    contextModelMessages,
     recentChatMessages,
     triggerMessage,
     repliedMessage,
@@ -354,7 +398,10 @@ export function buildChatDecisionMessages(
 
   return [
     new SystemMessage(CHAT_DECISION_SYSTEM_PROMPT),
+    ...(systemPrompt ? [new SystemMessage(systemPrompt)] : []),
     new SystemMessage(runtimeContextPrompt),
+    ...(inputEnvelopePrompt ? [new SystemMessage(inputEnvelopePrompt)] : []),
+    ...(contextModelMessages ?? []),
     new HumanMessage(
       `Decide the next Telegram bot action for the latest message.\nContext JSON:\n${JSON.stringify(
         payload,
@@ -383,6 +430,12 @@ export function sanitizeChatDecision(
     options.availableStickerIds ?? new Set<number>()
   );
   const responseMode = sanitizeResponseMode(decision.responseMode, sticker);
+  const responseText = sanitizeResponseText({
+    action: decision.action,
+    responseMode,
+    responseText: decision.responseText,
+    responseBrief,
+  });
   const targetUserId =
     decision.targetUserId && allowedUserIds.has(decision.targetUserId)
       ? decision.targetUserId
@@ -413,6 +466,7 @@ export function sanitizeChatDecision(
       conversation,
       taskActions,
       responseBrief,
+      responseText: "",
     };
   }
 
@@ -450,6 +504,7 @@ export function sanitizeChatDecision(
     conversation,
     taskActions,
     responseBrief,
+    responseText,
   };
 }
 
@@ -492,7 +547,8 @@ export function buildFallbackChatDecision(triggerTelegramMessageId: number | nul
       anchorMessageId: null,
     },
     taskActions: [],
-    responseBrief: "",
+    responseBrief: "I could not generate a response.",
+    responseText: "I could not generate a response.",
     decisionNote: "Fallback decision",
   };
 }
@@ -825,6 +881,9 @@ function normalizeRawChatDecision(value: unknown) {
     responseBrief:
       normalizeString(record.responseBrief) ||
       normalizeString(record.response_brief),
+    responseText:
+      normalizeString(record.responseText) ||
+      normalizeString(record.response_text),
     decisionNote:
       normalizeString(record.decisionNote) ||
       normalizeString(record.decision_note),

@@ -1,36 +1,36 @@
-import {
-  SystemMessage,
-  type BaseMessage,
-} from "@langchain/core/messages";
 import { assignConversationIdToMessage } from "../bot/conversation-store.js";
 import { listStickerCatalog } from "../bot/sticker-store.js";
 import { buildChatInputEnvelope } from "../infra/ai/input-envelope.js";
 import { readChatPrompt } from "../infra/ai/prompt.js";
 import { logError } from "../infra/error/index.js";
 import { type WebSearchContext } from "../infra/search/searxng.js";
+import type { ChatDecision } from "../infra/ai/decision.js";
 import { BaseTask } from "./base.js";
 import {
   buildChatModelMessages,
-  buildResponsePlanPrompt,
   buildToolContextPrompt,
-  type ChatToolObservationRecord,
 } from "./chat-context.js";
 import {
-  buildDecisionReplyParameters,
+  buildTelegramContextPacket,
+  summarizeTelegramContextPacket,
+} from "./chat-context-packet.js";
+import {
+  buildTelegramActionPlanFromLegacyDecision,
+  getTelegramMessageIdFromRef,
+} from "./chat-action-plan.js";
+import {
   decideChatNextStep,
   resolveEffectiveConversationId,
 } from "./chat-decision.js";
-import {
-  ChatResponseDelivery,
-  extractChatResponseText,
-} from "./chat-delivery.js";
+import { planChatNextStep } from "./chat-plan.js";
+import { validateTelegramActionPlan } from "./chat-plan-validator.js";
+import { executeTelegramActionPlan } from "./chat-plan-executor.js";
 import { runChatResearchLoop } from "./chat-research.js";
 import {
   isDirectStickerRequest,
   pickFallbackStickerForDirectRequest,
 } from "./chat-sticker.js";
 import { prepareChatTurn } from "./chat-turn.js";
-import { executeChatTaskActions } from "./chat-actions.js";
 import type { ChatTaskPayload } from "./types.js";
 
 export class ChatTask extends BaseTask {
@@ -67,31 +67,189 @@ export class ChatTask extends BaseTask {
       .catch(() => undefined);
 
     const stickerCatalog = await listStickerCatalog();
-    const decision = await decideChatNextStep({
+    const currentToolObservations = await runChatResearchLoop({
       record: this.record,
       decisionModel: this.dependencies.decisionModel,
-      allowTaskActions: payload.allowTaskActions !== false,
-      decisionTimeoutMs: this.dependencies.chatDecisionTimeoutMs,
       signal,
       runtimeContextPrompt,
-      contextMessages,
-      recentChatMessages,
-      triggerMessage,
-      repliedMessage,
-      availableStickers: stickerCatalog.map((sticker) => ({
-        id: sticker.id,
-        emoji: sticker.emoji,
-        setName: sticker.setName,
-        setTitle: sticker.setTitle,
-        isAnimated: sticker.isAnimated,
-        isVideo: sticker.isVideo,
-      })),
+      fallbackQuery: (payload.userInput ?? payload.text ?? "").trim(),
+      priorToolObservations,
     });
+    const latestSearchObservation = [...currentToolObservations]
+      .reverse()
+      .find((observation) => observation.type === "web_search");
+    const webSearchContext =
+      latestSearchObservation?.type === "web_search"
+        ? (latestSearchObservation.context as WebSearchContext | null)
+        : null;
+    const contextPacket = buildTelegramContextPacket({
+      record: this.record,
+      preparedTurn,
+      availableStickers: stickerCatalog,
+      priorToolObservations,
+      currentToolObservations,
+      allowTaskActions: payload.allowTaskActions !== false,
+    });
+    const systemPrompt = await readChatPrompt();
+    const contextModelMessages = await buildChatModelMessages({
+      dependencies: this.dependencies,
+      contextMessages,
+      signal,
+      triggerTelegramMessageId: triggerMessage?.telegramMessageId ?? null,
+      repliedTelegramMessageId: repliedMessage?.telegramMessageId ?? null,
+    });
+    const inputEnvelopePrompt = buildChatInputEnvelope({
+      latestRequest: latestUserInputContext,
+      runtimeContext: runtimeContextPrompt,
+      backlogSummary,
+      responsePlan: [
+        "Response plan:",
+        "- Decide whether to ignore or respond.",
+        "- If responding, decide whether to send text, text_with_sticker, or sticker_only.",
+        "- If sending text, put the exact final user-facing text into responseText.",
+      ].join("\n"),
+      toolContext: buildToolContextPrompt([
+        ...priorToolObservations,
+        ...currentToolObservations,
+      ]),
+    });
+    const plannedAction = await planChatNextStep({
+      record: this.record,
+      decisionModel: this.dependencies.decisionModel,
+      decisionTimeoutMs: this.dependencies.chatDecisionTimeoutMs,
+      signal,
+      systemPrompt,
+      runtimeContextPrompt,
+      inputEnvelopePrompt,
+      packet: contextPacket,
+    });
+    const decision = plannedAction == null
+      ? await decideChatNextStep({
+          record: this.record,
+          decisionModel: this.dependencies.decisionModel,
+          allowTaskActions: payload.allowTaskActions !== false,
+          decisionTimeoutMs: this.dependencies.chatDecisionTimeoutMs,
+          signal,
+          runtimeContextPrompt,
+          systemPrompt,
+          inputEnvelopePrompt,
+          contextMessages,
+          contextModelMessages,
+          recentChatMessages,
+          triggerMessage,
+          repliedMessage,
+          availableStickers: stickerCatalog.map((sticker) => ({
+            id: sticker.id,
+            emoji: sticker.emoji,
+            setName: sticker.setName,
+            setTitle: sticker.setTitle,
+            isAnimated: sticker.isAnimated,
+            isVideo: sticker.isVideo,
+          })),
+        })
+      : null;
+    const legacySelectedSticker =
+      decision?.sticker.send && decision.sticker.stickerId != null
+        ? stickerCatalog.find((sticker) => sticker.id === decision.sticker.stickerId) ??
+          null
+        : null;
+    const fallbackSticker =
+      legacySelectedSticker == null &&
+      plannedAction == null &&
+      isDirectStickerRequest(latestUserInputContext.normalizedInput)
+        ? pickFallbackStickerForDirectRequest(stickerCatalog)
+        : null;
+    const resolvedSticker = legacySelectedSticker ?? fallbackSticker;
+    const fallbackDecision: ChatDecision =
+      decision == null
+        ? {
+            action: "ignore" as const,
+            responseMode: "text" as const,
+            replyMode: "silent" as const,
+            replyToMessageId: null,
+            targetUserId: null,
+            sticker: {
+              send: false,
+              stickerId: null,
+              reason: "",
+            },
+            conversation: {
+              mode: "continue" as const,
+              anchorMessageId: null,
+            },
+            taskActions: [],
+            responseBrief: "",
+            responseText: "",
+            decisionNote: "",
+          }
+        : resolvedSticker == null &&
+            (decision.responseMode === "sticker_only" ||
+              decision.responseMode === "text_with_sticker")
+          ? {
+              ...decision,
+              responseMode: "text" as const,
+              sticker: {
+                ...decision.sticker,
+                send: false,
+                stickerId: null,
+              },
+            }
+          : fallbackSticker != null
+            ? {
+                ...decision,
+                responseMode: "sticker_only" as const,
+                sticker: {
+                  ...decision.sticker,
+                  send: true,
+                  stickerId: fallbackSticker.id,
+                },
+              }
+            : decision;
+    let plannerSource = plannedAction == null ? "legacy_decision" : "direct_action_plan";
+    let actionPlan;
+    if (plannedAction != null) {
+      try {
+        actionPlan = validateTelegramActionPlan({
+          packet: contextPacket,
+          plan: plannedAction,
+        });
+      } catch (error) {
+        logError("CHAT_ACTION_PLAN_VALIDATE", error, {
+          taskId: this.record.id,
+          conversationId: this.record.conversationId,
+          chatId: this.record.chatId,
+        });
+        plannerSource = "legacy_decision";
+      }
+    }
+
+    if (actionPlan == null) {
+      actionPlan = validateTelegramActionPlan({
+        packet: contextPacket,
+        plan: buildTelegramActionPlanFromLegacyDecision({
+          packet: contextPacket,
+          decision: fallbackDecision,
+        }),
+      });
+    }
     const effectiveConversationId = resolveEffectiveConversationId({
       currentConversationId: this.record.conversationId,
-      requestedConversation: decision.conversation,
+      requestedConversation: {
+        mode: actionPlan.conversation.mode,
+        anchorMessageId: getTelegramMessageIdFromRef(
+          contextPacket,
+          actionPlan.conversation.anchorRef
+        ),
+      },
       fallbackAnchorMessageId:
         repliedMessage?.telegramMessageId ??
+        this.record.triggerTelegramMessageId ??
+        null,
+      fallbackBranchRootMessageId:
+        getTelegramMessageIdFromRef(
+          contextPacket,
+          actionPlan.conversation.branchRootRef
+        ) ??
         this.record.triggerTelegramMessageId ??
         null,
     });
@@ -109,41 +267,14 @@ export class ChatTask extends BaseTask {
       );
     }
 
-    const taskActionResults = await executeChatTaskActions({
-      taskActions: decision.taskActions,
-      effectiveConversationId,
-      ...(threadId == null ? {} : { threadId }),
-      record: this.record,
-      taskRuntime: this.dependencies.taskRuntime,
-    });
-
-    let webSearchContext: WebSearchContext | null = null;
-    let currentToolObservations: ChatToolObservationRecord[] = [];
-    if (decision.action === "respond") {
-      currentToolObservations = await runChatResearchLoop({
-        record: this.record,
-        decisionModel: this.dependencies.decisionModel,
-        signal,
-        runtimeContextPrompt,
-        fallbackQuery: (payload.userInput ?? payload.text ?? "").trim(),
-        priorToolObservations,
-      });
-      const latestSearchObservation = [...currentToolObservations]
-        .reverse()
-        .find((observation) => observation.type === "web_search");
-
-      webSearchContext =
-        latestSearchObservation?.type === "web_search"
-          ? (latestSearchObservation.context as WebSearchContext | null)
-          : null;
-    }
-
     await this.saveContextSnapshot({
       triggerTelegramMessageId: this.record.triggerTelegramMessageId,
       decision,
+      plannerSource,
+      actionPlan,
       effectiveConversationId,
-      taskActionResults,
       webSearchContext,
+      contextPacketSummary: summarizeTelegramContextPacket(contextPacket),
       toolObservations: currentToolObservations.map((observation) => ({
         type: observation.type,
         context: observation.context,
@@ -153,159 +284,50 @@ export class ChatTask extends BaseTask {
 
     this.ensureSignalIsActive(signal);
 
-    if (decision.action === "ignore") {
+    if (actionPlan.disposition === "ignore") {
       return {
         action: "ignore",
         decision,
+        actionPlan,
         effectiveConversationId,
         messageCount: contextMessages.length,
         responseMessageId: null,
         responseText: null,
-        taskActionResults,
+        taskActionResults: [],
         triggerTelegramMessageId: this.record.triggerTelegramMessageId,
       };
     }
-
-    const effectiveReplyParameters = buildDecisionReplyParameters(
-      triggerMessage,
-      repliedMessage,
-      decision.replyMode === "reply_to_message"
-        ? decision.replyToMessageId
-        : null
-    );
-    const delivery = new ChatResponseDelivery(this.dependencies, this.record, {
+    this.ensureSignalIsActive(signal);
+    const execution = await executeTelegramActionPlan({
+      plan: actionPlan,
+      packet: contextPacket,
+      effectiveConversationId,
       ...(threadId == null ? {} : { threadId }),
-      ...(effectiveReplyParameters == null
-        ? {}
-        : { replyParameters: effectiveReplyParameters }),
-    });
-
-    try {
-      const selectedSticker =
-        decision.sticker.send && decision.sticker.stickerId != null
-          ? stickerCatalog.find(
-              (sticker) => sticker.id === decision.sticker.stickerId
-            ) ?? null
-          : null;
-      const fallbackSticker =
-        selectedSticker == null &&
-        isDirectStickerRequest(latestUserInputContext.normalizedInput)
-          ? pickFallbackStickerForDirectRequest(stickerCatalog)
-          : null;
-      const resolvedSticker = selectedSticker ?? fallbackSticker;
-      const effectiveResponseMode =
-        decision.responseMode === "sticker_only" && resolvedSticker == null
-          ? "text"
-          : decision.responseMode === "text_with_sticker" &&
-              resolvedSticker == null
-            ? "text"
-            : fallbackSticker != null
-              ? "sticker_only"
-            : decision.responseMode;
-
-      if (effectiveResponseMode === "sticker_only" && resolvedSticker != null) {
-        const stickerMessage = await delivery.deliverStickerOnly({
-          conversationId: effectiveConversationId,
-          fileId: resolvedSticker.fileId,
-        });
-
-        return {
-          action: "respond",
-          decision,
-          effectiveConversationId,
-          messageCount: contextMessages.length,
-          responseText: null,
-          responseMessageId: stickerMessage.message_id,
-          taskActionResults,
-          triggerTelegramMessageId: this.record.triggerTelegramMessageId,
-        };
-      }
-
-      await delivery.start(effectiveConversationId);
-      await this.throwIfCancellationRequested();
-
-      const systemPrompt = await readChatPrompt();
-      const contextModelMessages = await buildChatModelMessages({
-        dependencies: this.dependencies,
-        contextMessages,
-        signal,
-      });
-      const responsePlanPrompt = buildResponsePlanPrompt({
-        responseBrief: decision.responseBrief,
-        responseMode: effectiveResponseMode,
-        replyMode: decision.replyMode,
-        replyToMessageId: decision.replyToMessageId,
-        targetUserId: decision.targetUserId,
-      });
-      const inputEnvelopePrompt = buildChatInputEnvelope({
-        latestRequest: latestUserInputContext,
-        runtimeContext: runtimeContextPrompt,
-        backlogSummary,
-        responsePlan: responsePlanPrompt,
-        toolContext: buildToolContextPrompt([
-          ...priorToolObservations,
-          ...currentToolObservations,
-        ]),
-      });
-      const modelMessages: BaseMessage[] = [
-        new SystemMessage(systemPrompt),
-        new SystemMessage(inputEnvelopePrompt),
-        ...contextModelMessages,
-      ];
-      const responseMessage = await this.dependencies.chatModel.invoke(
-        modelMessages,
-        {
-          signal,
-        }
-      );
-      const extractedResponseText = extractChatResponseText(
-        responseMessage.content
-      );
-      const finalText =
-        extractedResponseText.length > 0
-          ? extractedResponseText
-          : "I could not generate a response.";
-      const deliveryResult = await delivery.deliverText({
-        conversationId: effectiveConversationId,
-        text: finalText,
-      });
-
-      if (effectiveResponseMode === "text_with_sticker" && resolvedSticker != null) {
-        await delivery
-          .sendSticker({
-            conversationId: effectiveConversationId,
-            fileId: resolvedSticker.fileId,
-            parentTelegramMessageId: deliveryResult.controlMessageId,
-          })
-          .catch((error) => {
-            logError("CHAT_STICKER_SEND", error, {
-              taskId: this.record.id,
-              chatId: this.record.chatId,
-              conversationId: effectiveConversationId,
-              stickerId: resolvedSticker.id,
-            });
-          });
-      }
-
-      return {
-        action: "respond",
-        decision,
-        effectiveConversationId,
-        messageCount: contextMessages.length,
-        responseText: finalText,
-        responseMessageId: deliveryResult.primaryMessageId,
-        taskActionResults,
-        triggerTelegramMessageId: this.record.triggerTelegramMessageId,
-      };
-    } catch (error) {
-      await delivery.fail({
-        conversationId: effectiveConversationId,
+      dependencies: {
+        api: this.dependencies.api,
+        taskRuntime: this.dependencies.taskRuntime,
+      },
+      record: this.record,
+      getFailureState: async () => ({
         cancellationRequested: await this.cancellationRequested(),
         timedOut: this.isTimedOut(),
-      });
+      }),
+    });
 
-      throw error;
-    }
+    return {
+      action: "respond",
+      decision,
+      actionPlan,
+      effectiveConversationId,
+      messageCount: contextMessages.length,
+      responseText: execution.responseText,
+      responseMessageId: execution.responseMessageId,
+      taskActionResults: execution.operationResults.filter(
+        (result) =>
+          result.type === "cancel_task" || result.type === "enqueue_task"
+      ),
+      triggerTelegramMessageId: this.record.triggerTelegramMessageId,
+    };
   }
 
   private parsePayload(): ChatTaskPayload {

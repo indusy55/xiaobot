@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, ne, or } from "drizzle-orm";
+import { and, desc, eq, ne, or, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { db } from "../db/index.js";
 import { tasksTable } from "../db/schema.js";
 import { logError } from "../infra/error/index.js";
@@ -12,6 +13,7 @@ import type {
 } from "./types.js";
 
 export class TaskWorker {
+  private readonly workerOwner = randomUUID();
   private isPolling = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private activeRuns = 0;
@@ -21,6 +23,10 @@ export class TaskWorker {
     private readonly maxAttempts = 3,
     private readonly maxConcurrentRuns = 2
   ) {}
+
+  private get leaseDurationMs() {
+    return this.dependencies.taskTimeoutMs + 5_000;
+  }
 
   async runNext() {
     const task = await this.claimNextPendingTask();
@@ -36,16 +42,7 @@ export class TaskWorker {
         taskType: task.type,
       });
 
-      if (task.retryCount + 1 < this.maxAttempts) {
-        await db
-          .update(tasksTable)
-          .set({
-            status: "pending",
-            retryCount: task.retryCount + 1,
-            updatedAt: Date.now(),
-          })
-          .where(eq(tasksTable.id, task.id));
-      }
+      await this.retryFailedTask(task);
     }
 
     return task.id;
@@ -58,7 +55,7 @@ export class TaskWorker {
 
     this.isPolling = true;
 
-    void this.recoverInterruptedTasks()
+    void this.recoverStaleInterruptedTasks()
       .catch((error) => {
         logError("TASK_WORKER_RECOVERY", error);
       })
@@ -92,6 +89,7 @@ export class TaskWorker {
     }
 
     try {
+      await this.recoverStaleInterruptedTasks();
       let launched = 0;
 
       while (this.isPolling && this.activeRuns < this.maxConcurrentRuns) {
@@ -127,16 +125,7 @@ export class TaskWorker {
         taskType: task.type,
       });
 
-      if (task.retryCount + 1 < this.maxAttempts) {
-        await db
-          .update(tasksTable)
-          .set({
-            status: "pending",
-            retryCount: task.retryCount + 1,
-            updatedAt: Date.now(),
-          })
-          .where(eq(tasksTable.id, task.id));
-      }
+      await this.retryFailedTask(task);
     } finally {
       this.activeRuns = Math.max(this.activeRuns - 1, 0);
       this.schedulePoll(0, idleMs, busyMs);
@@ -163,6 +152,8 @@ export class TaskWorker {
         .update(tasksTable)
         .set({
           status: "cancelled",
+          workerOwner: null,
+          leaseExpiresAt: null,
           cancelRequestedAt: now,
           finishedAt: now,
           updatedAt: now,
@@ -254,66 +245,97 @@ export class TaskWorker {
     };
   }
 
-  private async recoverInterruptedTasks() {
-    const now = Date.now();
+  private async recoverStaleInterruptedTasks(now = Date.now()) {
+    const staleBefore = now - this.dependencies.taskTimeoutMs;
 
     await db
       .update(tasksTable)
       .set({
         status: "pending",
+        workerOwner: null,
+        leaseExpiresAt: null,
         updatedAt: now,
       })
-      .where(eq(tasksTable.status, "running"));
+      .where(
+        and(
+          eq(tasksTable.status, "running"),
+          or(
+            sql`${tasksTable.leaseExpiresAt} <= ${now}`,
+            sql`${tasksTable.leaseExpiresAt} is null and ${tasksTable.startedAt} <= ${staleBefore}`,
+            sql`${tasksTable.startedAt} <= ${staleBefore}`,
+            sql`${tasksTable.updatedAt} <= ${staleBefore}`
+          )
+        )
+      );
 
     await db
       .update(tasksTable)
       .set({
         status: "cancelled",
+        workerOwner: null,
+        leaseExpiresAt: null,
         finishedAt: now,
-        updatedAt: now,
-      })
-      .where(eq(tasksTable.status, "cancelling"));
-  }
-
-  private async claimNextPendingTask() {
-    const [nextTask] = await db
-      .select()
-      .from(tasksTable)
-      .where(eq(tasksTable.status, "pending"))
-      .orderBy(asc(tasksTable.createdAt))
-      .limit(1);
-
-    if (!nextTask) {
-      return null;
-    }
-
-    const now = Date.now();
-
-    await db
-      .update(tasksTable)
-      .set({
-        status: "running",
-        startedAt: nextTask.startedAt ?? now,
         updatedAt: now,
       })
       .where(
         and(
-          eq(tasksTable.id, nextTask.id),
-          eq(tasksTable.status, "pending")
+          eq(tasksTable.status, "cancelling"),
+          or(
+            sql`${tasksTable.leaseExpiresAt} <= ${now}`,
+            sql`${tasksTable.leaseExpiresAt} is null and ${tasksTable.cancelRequestedAt} <= ${staleBefore}`,
+            sql`${tasksTable.cancelRequestedAt} <= ${staleBefore}`,
+            sql`${tasksTable.updatedAt} <= ${staleBefore}`
+          )
         )
       );
+  }
 
-    const [claimedTask] = await db
-      .select()
-      .from(tasksTable)
-      .where(eq(tasksTable.id, nextTask.id))
-      .limit(1);
+  private async claimNextPendingTask() {
+    const now = Date.now();
+    const leaseExpiresAt = now + this.leaseDurationMs;
+    const [claimedTask] = await db.all<TaskRecord>(sql`
+      with next_task as (
+        select id
+        from tasks
+        where status = 'pending'
+        order by createdAt asc
+        limit 1
+      )
+      update tasks
+      set
+        status = 'running',
+        workerOwner = ${this.workerOwner},
+        leaseExpiresAt = ${leaseExpiresAt},
+        startedAt = coalesce(startedAt, ${now}),
+        updatedAt = ${now}
+      where id = (select id from next_task)
+        and status = 'pending'
+      returning *
+    `);
 
-    if (!claimedTask || claimedTask.status !== "running") {
-      return null;
+    return claimedTask ?? null;
+  }
+
+  private async retryFailedTask(task: TaskRecord) {
+    const currentTask = await this.findTaskById(task.id);
+    if (!currentTask || currentTask.status !== "failed") {
+      return;
     }
 
-    return claimedTask as TaskRecord;
+    if (currentTask.retryCount + 1 >= this.maxAttempts) {
+      return;
+    }
+
+    await db
+      .update(tasksTable)
+      .set({
+        status: "pending",
+        retryCount: currentTask.retryCount + 1,
+        workerOwner: null,
+        leaseExpiresAt: null,
+        updatedAt: Date.now(),
+      })
+      .where(and(eq(tasksTable.id, currentTask.id), eq(tasksTable.status, "failed")));
   }
 
   private async findTaskById(taskId: number, scope?: CancelTaskScope) {

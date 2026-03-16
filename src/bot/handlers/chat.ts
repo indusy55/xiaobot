@@ -1,11 +1,13 @@
 import {
   assignConversationIdToMessages,
   findLatestConversationMessage,
-  inspectMessageHistory,
+  resolveConversationIdFromMessageHistory,
+  resolveBranchReferenceTelegramMessageId,
   updateMessageContextLinks,
 } from "../conversation-store.js";
 import {
   buildAnchoredConversationId,
+  buildBranchConversationId,
   buildConversationId,
 } from "../conversation.js";
 import { logError } from "../../infra/error/index.js";
@@ -227,22 +229,32 @@ async function resolveChatConversation(options: {
     };
   }
 
-  const history = await inspectMessageHistory({
+  const conversationIdFromHistory = await resolveConversationIdFromMessageHistory({
     chatId,
     telegramMessageId: replyToTelegramMessageId,
     baseConversationId,
     ...(threadId == null ? {} : { threadId }),
   });
-
+  const referenceTelegramMessageId = await resolveBranchReferenceTelegramMessageId(
+    {
+      chatId,
+      telegramMessageId: replyToTelegramMessageId,
+      ...(threadId == null ? {} : { threadId }),
+    }
+  );
   const conversationId =
-    history.conversationId ??
-    buildAnchoredConversationId(baseConversationId, replyToTelegramMessageId);
+    conversationIdFromHistory ??
+    buildBranchConversationId(
+      baseConversationId,
+      referenceTelegramMessageId,
+      telegramMessageId
+    );
 
   return {
     conversationId,
-    messageIdsToAssign: [...history.messageIds, telegramMessageId],
-    parentTelegramMessageId: undefined,
-    referenceTelegramMessageId: replyToTelegramMessageId,
+    messageIdsToAssign: [telegramMessageId],
+    parentTelegramMessageId: replyToTelegramMessageId,
+    referenceTelegramMessageId,
   };
 }
 

@@ -1,6 +1,9 @@
 import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { messagesTable } from "../db/schema.js";
+import {
+  hasBranchRootConversationId,
+} from "./conversation.js";
 
 interface StoredMessageConversation {
   id: number;
@@ -51,6 +54,24 @@ async function findMessageByTelegramMessageId(
   return message as StoredMessageConversation | undefined;
 }
 
+async function findMessageById(messageId: number) {
+  const [message] = await db
+    .select({
+      id: messagesTable.id,
+      conversationId: messagesTable.conversationId,
+      telegramMessageId: messagesTable.telegramMessageId,
+      replyToTelegramMessageId: messagesTable.replyToTelegramMessageId,
+      parentMessageId: messagesTable.parentMessageId,
+      referenceMessageId: messagesTable.referenceMessageId,
+      createdAt: messagesTable.createdAt,
+    })
+    .from(messagesTable)
+    .where(eq(messagesTable.id, messageId))
+    .limit(1);
+
+  return message as StoredMessageConversation | undefined;
+}
+
 export async function findPersistedMessageByTelegramMessageId(
   chatId: string,
   telegramMessageId: number,
@@ -63,6 +84,48 @@ export async function findPersistedMessageByTelegramMessageId(
   );
 
   return message ?? null;
+}
+
+export async function resolveBranchReferenceTelegramMessageId(options: {
+  chatId: string;
+  telegramMessageId: number;
+  threadId?: number;
+  maxDepth?: number;
+}) {
+  const { chatId, telegramMessageId, threadId, maxDepth = 20 } = options;
+  const message = await findMessageByTelegramMessageId(
+    chatId,
+    telegramMessageId,
+    threadId
+  );
+
+  if (!message) {
+    return telegramMessageId;
+  }
+
+  let currentReferenceId = message.referenceMessageId;
+  let latestTelegramMessageId = message.telegramMessageId ?? telegramMessageId;
+  const visited = new Set<number>();
+  let depth = 0;
+
+  while (
+    typeof currentReferenceId === "number" &&
+    !visited.has(currentReferenceId) &&
+    depth < maxDepth
+  ) {
+    visited.add(currentReferenceId);
+    const referenceMessage = await findMessageById(currentReferenceId);
+    if (!referenceMessage) {
+      break;
+    }
+
+    latestTelegramMessageId =
+      referenceMessage.telegramMessageId ?? latestTelegramMessageId;
+    currentReferenceId = referenceMessage.referenceMessageId;
+    depth += 1;
+  }
+
+  return latestTelegramMessageId;
 }
 
 export async function findLatestConversationMessage(options: {
@@ -205,6 +268,23 @@ export async function resolveConversationIdFromMessageHistory(options: {
     maxDepth,
     ...(threadId == null ? {} : { threadId }),
   });
+
+  const replyMessage = await findMessageByTelegramMessageId(
+    chatId,
+    telegramMessageId,
+    threadId
+  );
+  if (!replyMessage) {
+    return inspection.conversationId;
+  }
+
+  if (inspection.conversationId == null) {
+    return null;
+  }
+
+  if (hasBranchRootConversationId(inspection.conversationId)) {
+    return inspection.conversationId;
+  }
 
   return inspection.conversationId;
 }

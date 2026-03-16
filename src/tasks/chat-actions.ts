@@ -46,6 +46,7 @@ export async function executeChatTaskActions(options: {
       currentConversationId: effectiveConversationId,
       requestedConversation: taskAction.conversationMode,
       fallbackAnchorMessageId: record.triggerTelegramMessageId ?? null,
+      fallbackBranchRootMessageId: record.triggerTelegramMessageId ?? null,
     });
     const payload: Record<string, unknown> = {
       text: taskAction.userInput,

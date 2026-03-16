@@ -29,6 +29,8 @@ export interface TaskRecord {
   result: string | null;
   errorMessage: string | null;
   retryCount: number;
+  workerOwner: string | null;
+  leaseExpiresAt: number | null;
   cancelRequestedAt: number | null;
   startedAt: number | null;
   finishedAt: number | null;
@@ -87,6 +89,7 @@ export interface TaskDependencies {
   chatDecisionTimeoutMs: number;
   chatContextLimit: number;
   chatContextSummaryLimit: number;
+  chatMediaContextLimit: number;
   telegramMediaCacheDir: string;
 }
 

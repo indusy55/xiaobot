@@ -1,8 +1,10 @@
 import {
   buildAnchoredConversationId,
+  buildBranchConversationId,
   getBaseConversationId,
 } from "../bot/conversation.js";
 import { buildReplyQuoteParameters } from "../bot/message-quote.js";
+import type { BaseMessage } from "@langchain/core/messages";
 import {
   buildChatDecisionMessages,
   buildFallbackChatDecision,
@@ -20,7 +22,10 @@ export async function decideChatNextStep(options: {
   decisionTimeoutMs: number;
   signal: AbortSignal;
   runtimeContextPrompt: string;
+  systemPrompt?: string;
+  inputEnvelopePrompt?: string;
   contextMessages: TaskContextMessage[];
+  contextModelMessages?: BaseMessage[];
   recentChatMessages: TaskContextMessage[];
   triggerMessage: TaskContextMessage | null;
   repliedMessage: TaskContextMessage | null;
@@ -33,7 +38,10 @@ export async function decideChatNextStep(options: {
     decisionTimeoutMs,
     signal,
     runtimeContextPrompt,
+    systemPrompt,
+    inputEnvelopePrompt,
     contextMessages,
+    contextModelMessages,
     recentChatMessages,
     triggerMessage,
     repliedMessage,
@@ -43,8 +51,11 @@ export async function decideChatNextStep(options: {
   try {
     const decisionMessages = buildChatDecisionMessages({
       runtimeContextPrompt,
+      ...(systemPrompt == null ? {} : { systemPrompt }),
+      ...(inputEnvelopePrompt == null ? {} : { inputEnvelopePrompt }),
       conversationId: record.conversationId,
       conversationMessages: contextMessages,
+      ...(contextModelMessages == null ? {} : { contextModelMessages }),
       recentChatMessages,
       triggerMessage,
       repliedMessage,
@@ -88,9 +99,14 @@ export function resolveEffectiveConversationId(options: {
     anchorMessageId: number | null;
   };
   fallbackAnchorMessageId: number | null;
+  fallbackBranchRootMessageId: number | null;
 }) {
-  const { currentConversationId, requestedConversation, fallbackAnchorMessageId } =
-    options;
+  const {
+    currentConversationId,
+    requestedConversation,
+    fallbackAnchorMessageId,
+    fallbackBranchRootMessageId,
+  } = options;
   const baseConversationId = getBaseConversationId(currentConversationId);
 
   switch (requestedConversation.mode) {
@@ -105,7 +121,18 @@ export function resolveEffectiveConversationId(options: {
         return currentConversationId;
       }
 
-      return buildAnchoredConversationId(baseConversationId, anchorMessageId);
+      const branchRootMessageId =
+        fallbackBranchRootMessageId ?? fallbackAnchorMessageId;
+
+      if (branchRootMessageId == null) {
+        return buildAnchoredConversationId(baseConversationId, anchorMessageId);
+      }
+
+      return buildBranchConversationId(
+        baseConversationId,
+        anchorMessageId,
+        branchRootMessageId
+      );
     }
   }
 }

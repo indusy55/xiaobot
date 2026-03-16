@@ -119,6 +119,8 @@ export const tasksTable = sqliteTable(
     result: text(),
     errorMessage: text(),
     retryCount: int().notNull().default(0),
+    workerOwner: text(),
+    leaseExpiresAt: int(),
     cancelRequestedAt: int(),
     startedAt: int(),
     finishedAt: int(),
@@ -132,6 +134,7 @@ export const tasksTable = sqliteTable(
       table.createdAt
     ),
     index("tasks_chat_created_at_idx").on(table.chatId, table.createdAt),
+    index("tasks_worker_owner_idx").on(table.workerOwner, table.leaseExpiresAt),
   ]
 );
 

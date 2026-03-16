@@ -45,6 +45,7 @@ describe("sanitizeChatDecision", () => {
         },
         taskActions: [],
         responseBrief: "Reply to the user",
+        responseText: "Reply to the user",
         decisionNote: "test",
       },
       {
@@ -143,6 +144,7 @@ describe("sanitizeChatDecision", () => {
         },
         taskActions: [],
         responseBrief: "",
+        responseText: "",
         decisionNote: "test",
       },
       {
@@ -199,6 +201,84 @@ describe("sanitizeChatDecision", () => {
     expect(decision.responseMode).toBe("sticker_only");
     expect(decision.sticker.send).toBe(true);
     expect(decision.sticker.stickerId).toBe(1);
+    expect(decision.responseText).toBe("");
+  });
+
+  it("drops sticker placeholders from text responses and falls back to the brief", () => {
+    const decision = sanitizeChatDecision(
+      {
+        action: "respond",
+        responseMode: "text_with_sticker",
+        replyMode: "reply_to_message",
+        replyToMessageId: 101,
+        targetUserId: null,
+        sticker: {
+          send: true,
+          stickerId: 1,
+          reason: "Perfect reaction",
+        },
+        conversation: {
+          mode: "continue",
+          anchorMessageId: null,
+        },
+        taskActions: [],
+        responseBrief: "再来一个，这次给你发糖味的。",
+        responseText: "[贴纸]",
+        decisionNote: "test",
+      },
+      {
+        allowTaskActions: true,
+        triggerTelegramMessageId: 101,
+        triggerUserId: "1",
+        repliedTelegramMessageId: null,
+        conversationMessages: [
+          {
+            id: 1,
+            role: "user",
+            chatType: "private",
+            chatTitle: null,
+            contentType: "text",
+            textContent: "send reaction",
+            rawMessage: null,
+            replyToTelegramMessageId: null,
+            fromId: "1",
+            fromUsername: "alice",
+            fromFirstName: "Alice",
+            fromLastName: null,
+            fromLanguageCode: "en",
+            telegramMessageId: 101,
+            parentMessageId: null,
+            referenceMessageId: null,
+            createdAt: 1,
+          },
+        ],
+        recentChatMessages: [
+          {
+            id: 1,
+            role: "user",
+            chatType: "private",
+            chatTitle: null,
+            contentType: "text",
+            textContent: "send reaction",
+            rawMessage: null,
+            replyToTelegramMessageId: null,
+            fromId: "1",
+            fromUsername: "alice",
+            fromFirstName: "Alice",
+            fromLastName: null,
+            fromLanguageCode: "en",
+            telegramMessageId: 101,
+            parentMessageId: null,
+            referenceMessageId: null,
+            createdAt: 1,
+          },
+        ],
+        availableStickerIds: new Set([1, 2]),
+      }
+    );
+
+    expect(decision.responseMode).toBe("text_with_sticker");
+    expect(decision.responseText).toBe("再来一个，这次给你发糖味的。");
   });
 });
 
@@ -320,6 +400,7 @@ describe("parseChatDecisionResponse", () => {
       },
       "conversation": "continue",
       "response_brief": "",
+      "response_text": "",
       "decision_note": "send sticker"
     }`);
 
@@ -344,7 +425,9 @@ describe("parseChatDecisionResponse", () => {
       "sticker": {
         "sticker_id": "9"
       },
-      "conversation": "当前对话"
+      "conversation": "当前对话",
+      "response_text": "给你发一个",
+      "response_brief": "给你发一个"
     }`);
 
     const parsed = parseChatDecisionResponse(message);
@@ -355,5 +438,6 @@ describe("parseChatDecisionResponse", () => {
     expect(parsed.replyToMessageId).toBe(101);
     expect(parsed.sticker.stickerId).toBe(9);
     expect(parsed.conversation.mode).toBe("continue");
+    expect(parsed.responseText).toBe("给你发一个");
   });
 });
