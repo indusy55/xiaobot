@@ -31,6 +31,16 @@ export const webSearchDecisionSchema = z.object({
   reason: z.string().max(200),
 });
 
+export const capabilityDecisionSchema = z.object({
+  version: z.literal(1),
+  shouldSearch: z.boolean(),
+  query: z.string().max(256).nullable(),
+  shouldReadWebpage: z.boolean(),
+  webpageReadMode: z.enum(["none", "direct_url", "search_result"]),
+  directUrl: z.string().url().max(2048).nullable(),
+  reason: z.string().max(200),
+});
+
 export const webpageReadDecisionSchema = z.object({
   version: z.literal(1),
   shouldRead: z.boolean(),
@@ -55,6 +65,7 @@ export const chatDecisionSchema = z.object({
 export type ChatDecision = z.infer<typeof chatDecisionSchema>;
 export type ChatTaskAction = ChatDecision["taskActions"][number];
 export type WebSearchDecision = z.infer<typeof webSearchDecisionSchema>;
+export type CapabilityDecision = z.infer<typeof capabilityDecisionSchema>;
 export type WebpageReadDecision = z.infer<typeof webpageReadDecisionSchema>;
 
 export interface WebpageCandidateUrl {
@@ -83,11 +94,17 @@ interface SanitizeDecisionOptions {
   triggerTelegramMessageId: number | null;
   triggerUserId: string | null;
   repliedTelegramMessageId: number | null;
+  conversationMessages: TaskContextMessage[];
   recentChatMessages: TaskContextMessage[];
 }
 
 interface SanitizeWebSearchDecisionOptions {
   fallbackQuery: string | null;
+}
+
+interface SanitizeCapabilityDecisionOptions {
+  fallbackQuery: string | null;
+  directCandidateUrls: string[];
 }
 
 interface SanitizeWebpageReadDecisionOptions {
@@ -276,7 +293,7 @@ export function buildChatDecisionMessages(
       : null,
     trigger_message_id: triggerMessage?.telegramMessageId ?? null,
     replied_message_id: repliedMessage?.telegramMessageId ?? null,
-    candidate_reply_message_ids: getCandidateReplyMessageIds(recentChatMessages),
+    candidate_reply_message_ids: getCandidateReplyMessageIds(conversationMessages),
     trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
     replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
     participants: buildParticipants(recentChatMessages),
@@ -330,6 +347,45 @@ export function buildWebSearchDecisionMessages(options: BuildDecisionMessagesOpt
   ];
 }
 
+export function buildCapabilityDecisionMessages(
+  options: BuildDecisionMessagesOptions & {
+    directCandidateUrls: WebpageCandidateUrl[];
+  }
+) {
+  const {
+    decisionPrompt,
+    runtimeContextPrompt,
+    conversationId,
+    conversationMessages,
+    recentChatMessages,
+    triggerMessage,
+    repliedMessage,
+    directCandidateUrls,
+  } = options;
+  const payload = {
+    conversation_id: conversationId,
+    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
+    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
+    current_conversation_messages: conversationMessages
+      .slice(-10)
+      .map(serializeMessage),
+    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
+    direct_candidate_urls: directCandidateUrls,
+  };
+
+  return [
+    new SystemMessage(decisionPrompt),
+    new SystemMessage(runtimeContextPrompt),
+    new HumanMessage(
+      `Decide which external capabilities are needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
+        payload,
+        null,
+        2
+      )}`
+    ),
+  ];
+}
+
 export function buildWebpageReadDecisionMessages(
   options: BuildDecisionMessagesOptions & {
     candidateUrls: WebpageCandidateUrl[];
@@ -374,7 +430,7 @@ export function sanitizeChatDecision(
   options: SanitizeDecisionOptions
 ) {
   const allowedReplyMessageIds = new Set(
-    getCandidateReplyMessageIds(options.recentChatMessages)
+    getCandidateReplyMessageIds(options.conversationMessages)
   );
   const allowedUserIds = new Set(
     options.recentChatMessages
@@ -465,6 +521,60 @@ export function sanitizeWebSearchDecision(
   };
 }
 
+export function sanitizeCapabilityDecision(
+  decision: CapabilityDecision,
+  options: SanitizeCapabilityDecisionOptions
+) {
+  const directCandidateUrlSet = new Set(options.directCandidateUrls);
+  const query = cleanValue(decision.query) ?? options.fallbackQuery;
+  const directUrl = cleanValue(decision.directUrl);
+
+  const shouldSearch = decision.shouldSearch && query != null;
+  const sanitizedQuery = shouldSearch ? query.slice(0, 256) : null;
+
+  if (!decision.shouldReadWebpage || decision.webpageReadMode === "none") {
+    return {
+      ...decision,
+      shouldSearch,
+      query: sanitizedQuery,
+      shouldReadWebpage: false,
+      webpageReadMode: "none" as const,
+      directUrl: null,
+    };
+  }
+
+  if (decision.webpageReadMode === "direct_url") {
+    if (directUrl == null || !directCandidateUrlSet.has(directUrl)) {
+      return {
+        ...decision,
+        shouldSearch,
+        query: sanitizedQuery,
+        shouldReadWebpage: false,
+        webpageReadMode: "none" as const,
+        directUrl: null,
+      };
+    }
+
+    return {
+      ...decision,
+      shouldSearch,
+      query: sanitizedQuery,
+      shouldReadWebpage: true,
+      webpageReadMode: "direct_url" as const,
+      directUrl,
+    };
+  }
+
+  return {
+    ...decision,
+    shouldSearch,
+    query: sanitizedQuery,
+    shouldReadWebpage: shouldSearch,
+    webpageReadMode: shouldSearch ? "search_result" as const : "none" as const,
+    directUrl: null,
+  };
+}
+
 export function sanitizeWebpageReadDecision(
   decision: WebpageReadDecision,
   options: SanitizeWebpageReadDecisionOptions
@@ -508,14 +618,18 @@ export function buildFallbackChatDecision(triggerTelegramMessageId: number | nul
 export function buildFastPathChatDecision(options: {
   triggerTelegramMessageId: number | null;
   triggerUserId: string | null;
+  replyToMessageId?: number | null;
   responseBrief?: string;
 }) {
+  const replyToMessageId =
+    options.replyToMessageId ?? options.triggerTelegramMessageId;
+
   return {
     version: 1 as const,
     action: "respond" as const,
     replyMode:
-      options.triggerTelegramMessageId == null ? "send_message" as const : "reply_to_message" as const,
-    replyToMessageId: options.triggerTelegramMessageId,
+      replyToMessageId == null ? "send_message" as const : "reply_to_message" as const,
+    replyToMessageId,
     targetUserId: options.triggerUserId,
     conversation: {
       mode: "continue" as const,
@@ -533,6 +647,18 @@ export function buildFallbackWebSearchDecision(): WebSearchDecision {
     version: 1,
     shouldSearch: false,
     query: null,
+    reason: "Fallback decision",
+  };
+}
+
+export function buildFallbackCapabilityDecision(): CapabilityDecision {
+  return {
+    version: 1,
+    shouldSearch: false,
+    query: null,
+    shouldReadWebpage: false,
+    webpageReadMode: "none",
+    directUrl: null,
     reason: "Fallback decision",
   };
 }
@@ -594,6 +720,12 @@ export function parseWebSearchDecisionResponse(message: AIMessage) {
   const text = extractTextContent(message.content).trim();
   const jsonText = findJsonObject(text);
   return webSearchDecisionSchema.parse(JSON.parse(jsonText));
+}
+
+export function parseCapabilityDecisionResponse(message: AIMessage) {
+  const text = extractTextContent(message.content).trim();
+  const jsonText = findJsonObject(text);
+  return capabilityDecisionSchema.parse(JSON.parse(jsonText));
 }
 
 export function parseWebpageReadDecisionResponse(message: AIMessage) {

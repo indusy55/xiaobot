@@ -27,12 +27,13 @@ function main() {
 			decisionModel,
 			taskTimeoutMs: cfg.TASK_TIMEOUT_MS,
 			chatContextLimit: cfg.CHAT_CONTEXT_LIMIT,
+			chatContextSummaryLimit: cfg.CHAT_CONTEXT_SUMMARY_LIMIT,
 			telegramMediaCacheDir: cfg.TELEGRAM_MEDIA_CACHE_DIR,
 			taskRuntime: {
 				enqueueChatTask,
 				requestCancelLatest: (scope) => taskWorker.requestCancelLatest(scope),
 			},
-		});
+		}, 3, cfg.TASK_WORKER_CONCURRENCY);
 
 		setupMessagePersistenceMiddleware(bot);
 		setupMessageLoggerMiddleware(bot);

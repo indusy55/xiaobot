@@ -570,5 +570,6 @@ export async function deliverMarkdownV2Text(options: {
     chunks,
     messageIds: sentMessageIds,
     primaryMessageId: placeholderMessageId,
+    controlMessageId: sentMessageIds.at(-1) ?? placeholderMessageId,
   };
 }

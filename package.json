@@ -8,7 +8,7 @@
     "build": "tsgo -b",
     "dev": "tsx watch src/main",
     "start": "node dist/src/main.js",
-    "test": "vitest run --pool threads src/infra/ai/decision.test.ts src/infra/webpage/read-webpage.test.ts",
+    "test": "vitest run --pool threads src/infra/ai/decision.test.ts src/infra/ai/input-envelope.test.ts src/infra/ai/conversation-summary.test.ts src/infra/webpage/read-webpage.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"
   },

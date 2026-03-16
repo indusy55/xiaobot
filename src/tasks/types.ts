@@ -83,6 +83,7 @@ export interface TaskDependencies {
   taskRuntime: TaskRuntime;
   taskTimeoutMs: number;
   chatContextLimit: number;
+  chatContextSummaryLimit: number;
   telegramMediaCacheDir: string;
 }
 

@@ -14,10 +14,12 @@ import type {
 export class TaskWorker {
   private isPolling = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeRuns = 0;
 
   constructor(
     private readonly dependencies: TaskDependencies,
-    private readonly maxAttempts = 3
+    private readonly maxAttempts = 3,
+    private readonly maxConcurrentRuns = 2
   ) {}
 
   async runNext() {
@@ -56,31 +58,12 @@ export class TaskWorker {
 
     this.isPolling = true;
 
-    const tick = async () => {
-      if (!this.isPolling) {
-        return;
-      }
-
-      try {
-        const taskId = await this.runNext();
-        const nextDelay = taskId == null ? idleMs : busyMs;
-        this.pollTimer = setTimeout(() => {
-          void tick();
-        }, nextDelay);
-      } catch (error) {
-        logError("TASK_WORKER_POLL", error);
-        this.pollTimer = setTimeout(() => {
-          void tick();
-        }, idleMs);
-      }
-    };
-
     void this.recoverInterruptedTasks()
       .catch((error) => {
         logError("TASK_WORKER_RECOVERY", error);
       })
       .finally(() => {
-        void tick();
+        this.schedulePoll(0, idleMs, busyMs);
       });
   }
 
@@ -89,6 +72,74 @@ export class TaskWorker {
     if (this.pollTimer != null) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
+    }
+  }
+
+  private schedulePoll(delayMs: number, idleMs: number, busyMs: number) {
+    if (!this.isPolling || this.pollTimer != null) {
+      return;
+    }
+
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.poll(idleMs, busyMs);
+    }, delayMs);
+  }
+
+  private async poll(idleMs: number, busyMs: number) {
+    if (!this.isPolling) {
+      return;
+    }
+
+    try {
+      let launched = 0;
+
+      while (this.isPolling && this.activeRuns < this.maxConcurrentRuns) {
+        const task = await this.claimNextPendingTask();
+        if (!task) {
+          break;
+        }
+
+        launched += 1;
+        this.activeRuns += 1;
+        void this.runClaimedTask(task, idleMs, busyMs);
+      }
+
+      const nextDelay =
+        launched > 0 || this.activeRuns > 0 ? busyMs : idleMs;
+      this.schedulePoll(nextDelay, idleMs, busyMs);
+    } catch (error) {
+      logError("TASK_WORKER_POLL", error);
+      this.schedulePoll(idleMs, idleMs, busyMs);
+    }
+  }
+
+  private async runClaimedTask(
+    task: TaskRecord,
+    idleMs: number,
+    busyMs: number
+  ) {
+    try {
+      await createTask(task, this.dependencies).run();
+    } catch (error) {
+      logError("TASK_WORKER", error, {
+        taskId: task.id,
+        taskType: task.type,
+      });
+
+      if (task.retryCount + 1 < this.maxAttempts) {
+        await db
+          .update(tasksTable)
+          .set({
+            status: "pending",
+            retryCount: task.retryCount + 1,
+            updatedAt: Date.now(),
+          })
+          .where(eq(tasksTable.id, task.id));
+      }
+    } finally {
+      this.activeRuns = Math.max(this.activeRuns - 1, 0);
+      this.schedulePoll(0, idleMs, busyMs);
     }
   }
 

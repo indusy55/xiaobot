@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, or } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { messagesTable, tasksTable } from "../db/schema.js";
 import { getAnchorMessageId } from "../bot/conversation.js";
@@ -121,24 +121,47 @@ export abstract class BaseTask {
 
   protected async loadContext(limit = 20): Promise<TaskContextMessage[]> {
     const anchorMessageId = getAnchorMessageId(this.task.conversationId);
-    const rows = await db
+    const conversationRows = await db
       .select(taskContextMessageSelection)
       .from(messagesTable)
       .where(
         and(
-          or(
-            eq(messagesTable.conversationId, this.task.conversationId),
-            anchorMessageId == null
-              ? undefined
-              : eq(messagesTable.telegramMessageId, anchorMessageId)
-          ),
+          eq(messagesTable.conversationId, this.task.conversationId),
           eq(messagesTable.chatId, this.task.chatId)
         )
       )
       .orderBy(desc(messagesTable.createdAt))
-      .limit(limit);
+      .limit(anchorMessageId == null ? limit : Math.max(limit - 1, 0));
 
-    return rows.reverse();
+    if (anchorMessageId == null) {
+      return conversationRows.reverse();
+    }
+
+    const [anchorRow] = await db
+      .select(taskContextMessageSelection)
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.chatId, this.task.chatId),
+          eq(messagesTable.telegramMessageId, anchorMessageId)
+        )
+      )
+      .limit(1);
+
+    const rows = conversationRows.reverse();
+    if (!anchorRow) {
+      return rows;
+    }
+
+    const hasAnchorInConversationRows = rows.some(
+      (message) => message.telegramMessageId === anchorMessageId
+    );
+
+    if (hasAnchorInConversationRows) {
+      return rows;
+    }
+
+    return [anchorRow as TaskContextMessage, ...rows].slice(0, limit);
   }
 
   protected async loadRecentChatMessages(
@@ -158,6 +181,30 @@ export abstract class BaseTask {
       .limit(limit);
 
     return rows.reverse();
+  }
+
+  protected async loadOlderConversationMessages(
+    beforeCreatedAt: number,
+    limit = 10
+  ): Promise<TaskContextMessage[]> {
+    if (limit <= 0) {
+      return [];
+    }
+
+    const rows = await db
+      .select(taskContextMessageSelection)
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.conversationId, this.task.conversationId),
+          eq(messagesTable.chatId, this.task.chatId),
+          lt(messagesTable.createdAt, beforeCreatedAt)
+        )
+      )
+      .orderBy(desc(messagesTable.createdAt))
+      .limit(limit);
+
+    return rows.reverse() as TaskContextMessage[];
   }
 
   protected async loadMessageByTelegramMessageId(

@@ -16,21 +16,15 @@ const CHAT_DECISION_PROMPT_PATH = join(
   "prompts",
   "chat-decision.md"
 );
-const CHAT_SEARCH_DECISION_PROMPT_PATH = join(
+const CHAT_CAPABILITY_DECISION_PROMPT_PATH = join(
   process.cwd(),
   "prompts",
-  "chat-search-decision.md"
-);
-const CHAT_WEBPAGE_DECISION_PROMPT_PATH = join(
-  process.cwd(),
-  "prompts",
-  "chat-webpage-decision.md"
+  "chat-capability-decision.md"
 );
 
 let cachedPrompt: string | null = null;
 let cachedDecisionPrompt: string | null = null;
-let cachedSearchDecisionPrompt: string | null = null;
-let cachedWebpageDecisionPrompt: string | null = null;
+let cachedCapabilityDecisionPrompt: string | null = null;
 
 export async function readChatPrompt() {
   if (cachedPrompt != null) {
@@ -58,24 +52,13 @@ export async function readChatDecisionPrompt() {
   return cachedDecisionPrompt;
 }
 
-export async function readChatSearchDecisionPrompt() {
-  if (cachedSearchDecisionPrompt != null) {
-    return cachedSearchDecisionPrompt;
+export async function readChatCapabilityDecisionPrompt() {
+  if (cachedCapabilityDecisionPrompt != null) {
+    return cachedCapabilityDecisionPrompt;
   }
 
-  cachedSearchDecisionPrompt = (
-    await readFile(CHAT_SEARCH_DECISION_PROMPT_PATH, "utf8")
+  cachedCapabilityDecisionPrompt = (
+    await readFile(CHAT_CAPABILITY_DECISION_PROMPT_PATH, "utf8")
   ).trim();
-  return cachedSearchDecisionPrompt;
-}
-
-export async function readChatWebpageDecisionPrompt() {
-  if (cachedWebpageDecisionPrompt != null) {
-    return cachedWebpageDecisionPrompt;
-  }
-
-  cachedWebpageDecisionPrompt = (
-    await readFile(CHAT_WEBPAGE_DECISION_PROMPT_PATH, "utf8")
-  ).trim();
-  return cachedWebpageDecisionPrompt;
+  return cachedCapabilityDecisionPrompt;
 }

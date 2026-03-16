@@ -20,30 +20,29 @@ import {
 import {
   buildFastPathChatDecision,
   buildChatDecisionMessages,
-  buildFallbackWebSearchDecision,
-  buildFallbackWebpageReadDecision,
+  buildCapabilityDecisionMessages,
+  buildFallbackCapabilityDecision,
   buildFallbackChatDecision,
-  buildWebSearchDecisionMessages,
-  buildWebpageReadDecisionMessages,
   parseChatDecisionResponse,
-  parseWebSearchDecisionResponse,
-  parseWebpageReadDecisionResponse,
+  parseCapabilityDecisionResponse,
   sanitizeChatDecision,
-  sanitizeWebSearchDecision,
-  sanitizeWebpageReadDecision,
+  sanitizeCapabilityDecision,
   type ChatTaskAction,
   type WebpageCandidateUrl,
 } from "../infra/ai/decision.js";
 import {
+  readChatCapabilityDecisionPrompt,
   readChatDecisionPrompt,
   readChatPrompt,
-  readChatSearchDecisionPrompt,
-  readChatWebpageDecisionPrompt,
 } from "../infra/ai/prompt.js";
+import {
+  buildConversationBacklogSummary,
+} from "../infra/ai/conversation-summary.js";
 import {
   buildRuntimeContextPrompt,
   formatMessageSpeakerPrefix,
 } from "../infra/ai/runtime-context.js";
+import { buildChatInputEnvelope } from "../infra/ai/input-envelope.js";
 import {
   type WebSearchContext,
 } from "../infra/search/searxng.js";
@@ -297,6 +296,13 @@ function collectWebpageCandidateUrls(options: {
   return [...candidates.values()].slice(0, 8);
 }
 
+function pickSearchResultUrlForWebpageRead(webSearchContext: WebSearchContext | null) {
+  return (
+    webSearchContext?.results.find((result) => typeof result.link === "string")?.link ??
+    null
+  );
+}
+
 function buildResponsePlanPrompt(options: {
   responseBrief: string;
   replyMode: "reply_to_message" | "send_message" | "silent";
@@ -323,6 +329,27 @@ function buildResponsePlanPrompt(options: {
 
   lines.push("- Write the final user-facing message only.");
   return lines.join("\n");
+}
+
+function buildLatestUserInputContext(options: {
+  payload: ChatTaskPayload;
+  triggerMessage: TaskContextMessage | null;
+}) {
+  const normalizedInput = (
+    options.payload.userInput ??
+    options.payload.text ??
+    options.triggerMessage?.textContent ??
+    ""
+  ).trim();
+  return {
+    normalizedInput: normalizedInput.length > 0 ? normalizedInput : null,
+    speaker:
+      options.triggerMessage?.role === "user"
+        ? formatMessageSpeakerPrefix(options.triggerMessage)
+        : null,
+    triggerMessageId: options.triggerMessage?.telegramMessageId ?? null,
+    contentType: options.triggerMessage?.contentType ?? null,
+  };
 }
 
 function shouldUseStructuredDecision(options: {
@@ -427,6 +454,14 @@ export class ChatTask extends BaseTask {
       this.record.triggerTelegramMessageId,
       payload.userInput
     );
+    const oldestContextMessage = contextMessages[0] ?? null;
+    const olderConversationMessages =
+      oldestContextMessage != null && contextMessages.length >= this.dependencies.chatContextLimit
+        ? await this.loadOlderConversationMessages(
+            oldestContextMessage.createdAt,
+            this.dependencies.chatContextSummaryLimit
+          )
+        : [];
     const recentChatMessages = await this.loadRecentChatMessages(24, threadId);
     const triggerMessage = findTriggerMessage(
       contextMessages,
@@ -445,6 +480,11 @@ export class ChatTask extends BaseTask {
       triggerMessage,
       repliedMessage,
     });
+    const latestUserInputContext = buildLatestUserInputContext({
+      payload,
+      triggerMessage,
+    });
+    const backlogSummary = buildConversationBacklogSummary(olderConversationMessages);
 
     await this.dependencies.api.sendChatAction(this.record.chatId, "typing").catch(
       () => undefined
@@ -468,6 +508,9 @@ export class ChatTask extends BaseTask {
       : buildFastPathChatDecision({
           triggerTelegramMessageId: this.record.triggerTelegramMessageId,
           triggerUserId: triggerMessage?.fromId ?? null,
+          replyToMessageId:
+            repliedMessage?.telegramMessageId ??
+            this.record.triggerTelegramMessageId,
         });
     const effectiveConversationId = resolveConversationId({
       currentConversationId: this.record.conversationId,
@@ -501,7 +544,16 @@ export class ChatTask extends BaseTask {
     let webpageReadContext: Awaited<ReturnType<typeof runReadWebpageTool>> | null =
       null;
     if (decision.action === "respond") {
-      const webSearchDecision = await this.decideWebSearch({
+      const webpageCandidateUrls = collectWebpageCandidateUrls({
+        contextMessages,
+        triggerMessage,
+        repliedMessage,
+        webSearchContext: null,
+      });
+      const directCandidateUrls = webpageCandidateUrls.filter(
+        (candidate) => candidate.source !== "search_result"
+      );
+      const capabilityDecision = await this.decideCapabilities({
         signal,
         runtimeContextPrompt,
         contextMessages,
@@ -509,11 +561,12 @@ export class ChatTask extends BaseTask {
         triggerMessage,
         repliedMessage,
         fallbackQuery: (payload.userInput ?? payload.text ?? "").trim(),
+        directCandidateUrls,
       });
 
-      if (webSearchDecision.shouldSearch && webSearchDecision.query) {
+      if (capabilityDecision.shouldSearch && capabilityDecision.query) {
         try {
-          webSearchContext = await runWebSearchTool(webSearchDecision.query, {
+          webSearchContext = await runWebSearchTool(capabilityDecision.query, {
             signal,
           });
         } catch (error) {
@@ -525,25 +578,18 @@ export class ChatTask extends BaseTask {
         }
       }
 
-      const webpageCandidateUrls = collectWebpageCandidateUrls({
-        contextMessages,
-        triggerMessage,
-        repliedMessage,
-        webSearchContext,
-      });
-      const webpageReadDecision = await this.decideWebpageRead({
-        signal,
-        runtimeContextPrompt,
-        contextMessages,
-        recentChatMessages,
-        triggerMessage,
-        repliedMessage,
-        candidateUrls: webpageCandidateUrls,
-      });
+      const webpageUrlToRead =
+        capabilityDecision.shouldReadWebpage &&
+        capabilityDecision.webpageReadMode === "direct_url"
+          ? capabilityDecision.directUrl
+          : capabilityDecision.shouldReadWebpage &&
+              capabilityDecision.webpageReadMode === "search_result"
+            ? pickSearchResultUrlForWebpageRead(webSearchContext)
+            : null;
 
-      if (webpageReadDecision.shouldRead && webpageReadDecision.url) {
+      if (webpageUrlToRead) {
         try {
-          webpageReadContext = await runReadWebpageTool(webpageReadDecision.url, {
+          webpageReadContext = await runReadWebpageTool(webpageUrlToRead, {
             signal,
           });
         } catch (error) {
@@ -551,7 +597,7 @@ export class ChatTask extends BaseTask {
             taskId: this.record.id,
             chatId: this.record.chatId,
             conversationId: effectiveConversationId,
-            url: webpageReadDecision.url,
+            url: webpageUrlToRead,
           });
         }
       }
@@ -626,23 +672,27 @@ export class ChatTask extends BaseTask {
         contextMessages,
         signal
       );
+      const responsePlanPrompt = buildResponsePlanPrompt({
+        responseBrief: decision.responseBrief,
+        replyMode: decision.replyMode,
+        replyToMessageId: decision.replyToMessageId,
+        targetUserId: decision.targetUserId,
+      });
+      const inputEnvelopePrompt = buildChatInputEnvelope({
+        latestRequest: latestUserInputContext,
+        runtimeContext: runtimeContextPrompt,
+        backlogSummary,
+        responsePlan: responsePlanPrompt,
+        webSearchContext:
+          webSearchContext == null ? null : formatWebSearchPrompt(webSearchContext),
+        webpageReadContext:
+          webpageReadContext == null
+            ? null
+            : formatWebpageReadPrompt(webpageReadContext),
+      });
       const modelMessages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
-        new SystemMessage(runtimeContextPrompt),
-        ...(webSearchContext == null
-          ? []
-          : [new SystemMessage(formatWebSearchPrompt(webSearchContext))]),
-        ...(webpageReadContext == null
-          ? []
-          : [new SystemMessage(formatWebpageReadPrompt(webpageReadContext))]),
-        new SystemMessage(
-          buildResponsePlanPrompt({
-            responseBrief: decision.responseBrief,
-            replyMode: decision.replyMode,
-            replyToMessageId: decision.replyToMessageId,
-            targetUserId: decision.targetUserId,
-          })
-        ),
+        new SystemMessage(inputEnvelopePrompt),
         ...contextModelMessages,
       ];
       const responseMessage = await this.dependencies.chatModel.invoke(modelMessages, {
@@ -665,6 +715,9 @@ export class ChatTask extends BaseTask {
         editOptions: {
           reply_markup: buildTaskCancelKeyboard(this.record.id),
         },
+        sendOptions: {
+          reply_markup: buildTaskCancelKeyboard(this.record.id),
+        },
       });
       await streamer.complete();
 
@@ -685,7 +738,7 @@ export class ChatTask extends BaseTask {
           ...(threadId == null ? {} : { threadId }),
         });
       }
-      await this.switchReplyControls(delivery.primaryMessageId, "retry");
+      await this.switchReplyControls(delivery.messageIds, "retry");
 
       return {
         action: "respond",
@@ -714,7 +767,10 @@ export class ChatTask extends BaseTask {
         });
       }
 
-      await this.switchReplyControls(streamer.state?.messageId ?? null, "retry");
+      await this.switchReplyControls(
+        streamer.state?.messageId == null ? [] : [streamer.state.messageId],
+        "retry"
+      );
 
       if (streamer.state?.messageId != null) {
         await assignConversationIdToMessage(
@@ -776,6 +832,7 @@ export class ChatTask extends BaseTask {
         triggerTelegramMessageId: this.record.triggerTelegramMessageId,
         triggerUserId: triggerMessage?.fromId ?? null,
         repliedTelegramMessageId: repliedMessage?.telegramMessageId ?? null,
+        conversationMessages: contextMessages,
         recentChatMessages,
       });
     } catch (error) {
@@ -789,7 +846,7 @@ export class ChatTask extends BaseTask {
     }
   }
 
-  private async decideWebSearch(options: {
+  private async decideCapabilities(options: {
     signal: AbortSignal;
     runtimeContextPrompt: string;
     contextMessages: TaskContextMessage[];
@@ -797,6 +854,7 @@ export class ChatTask extends BaseTask {
     triggerMessage: TaskContextMessage | null;
     repliedMessage: TaskContextMessage | null;
     fallbackQuery: string;
+    directCandidateUrls: WebpageCandidateUrl[];
   }) {
     const {
       signal,
@@ -806,22 +864,20 @@ export class ChatTask extends BaseTask {
       triggerMessage,
       repliedMessage,
       fallbackQuery,
+      directCandidateUrls,
     } = options;
 
-    if (fallbackQuery.trim().length === 0) {
-      return buildFallbackWebSearchDecision();
-    }
-
     try {
-      const searchDecisionPrompt = await readChatSearchDecisionPrompt();
-      const decisionMessages = buildWebSearchDecisionMessages({
-        decisionPrompt: searchDecisionPrompt,
+      const capabilityDecisionPrompt = await readChatCapabilityDecisionPrompt();
+      const decisionMessages = buildCapabilityDecisionMessages({
+        decisionPrompt: capabilityDecisionPrompt,
         runtimeContextPrompt,
         conversationId: this.record.conversationId,
         conversationMessages: contextMessages,
         recentChatMessages,
         triggerMessage,
         repliedMessage,
+        directCandidateUrls,
       });
       const decisionSignal = AbortSignal.any([
         signal,
@@ -833,80 +889,20 @@ export class ChatTask extends BaseTask {
           signal: decisionSignal,
         }
       );
-      const rawDecision = parseWebSearchDecisionResponse(decisionMessage);
+      const rawDecision = parseCapabilityDecisionResponse(decisionMessage);
 
-      return sanitizeWebSearchDecision(rawDecision, {
+      return sanitizeCapabilityDecision(rawDecision, {
         fallbackQuery: fallbackQuery.trim(),
+        directCandidateUrls: directCandidateUrls.map((candidate) => candidate.url),
       });
     } catch (error) {
-      logError("WEB_SEARCH_DECISION", error, {
+      logError("CHAT_CAPABILITY_DECISION", error, {
         taskId: this.record.id,
         conversationId: this.record.conversationId,
         chatId: this.record.chatId,
       });
 
-      return buildFallbackWebSearchDecision();
-    }
-  }
-
-  private async decideWebpageRead(options: {
-    signal: AbortSignal;
-    runtimeContextPrompt: string;
-    contextMessages: TaskContextMessage[];
-    recentChatMessages: TaskContextMessage[];
-    triggerMessage: TaskContextMessage | null;
-    repliedMessage: TaskContextMessage | null;
-    candidateUrls: WebpageCandidateUrl[];
-  }) {
-    const {
-      signal,
-      runtimeContextPrompt,
-      contextMessages,
-      recentChatMessages,
-      triggerMessage,
-      repliedMessage,
-      candidateUrls,
-    } = options;
-
-    if (candidateUrls.length === 0) {
-      return buildFallbackWebpageReadDecision();
-    }
-
-    try {
-      const webpageDecisionPrompt = await readChatWebpageDecisionPrompt();
-      const decisionMessages = buildWebpageReadDecisionMessages({
-        decisionPrompt: webpageDecisionPrompt,
-        runtimeContextPrompt,
-        conversationId: this.record.conversationId,
-        conversationMessages: contextMessages,
-        recentChatMessages,
-        triggerMessage,
-        repliedMessage,
-        candidateUrls,
-      });
-      const decisionSignal = AbortSignal.any([
-        signal,
-        AbortSignal.timeout(2500),
-      ]);
-      const decisionMessage = await this.dependencies.decisionModel.invoke(
-        decisionMessages,
-        {
-          signal: decisionSignal,
-        }
-      );
-      const rawDecision = parseWebpageReadDecisionResponse(decisionMessage);
-
-      return sanitizeWebpageReadDecision(rawDecision, {
-        candidateUrls: candidateUrls.map((candidate) => candidate.url),
-      });
-    } catch (error) {
-      logError("WEBPAGE_READ_DECISION", error, {
-        taskId: this.record.id,
-        conversationId: this.record.conversationId,
-        chatId: this.record.chatId,
-      });
-
-      return buildFallbackWebpageReadDecision();
+      return buildFallbackCapabilityDecision();
     }
   }
 
@@ -991,10 +987,17 @@ export class ChatTask extends BaseTask {
   }
 
   private async switchReplyControls(
-    messageId: number | null,
+    messageIds: number[] | number | null,
     mode: "cancel" | "retry"
   ) {
-    if (messageId == null) {
+    const normalizedMessageIds =
+      typeof messageIds === "number"
+        ? [messageIds]
+        : Array.isArray(messageIds)
+          ? [...new Set(messageIds)]
+          : [];
+
+    if (normalizedMessageIds.length === 0) {
       return;
     }
 
@@ -1003,23 +1006,27 @@ export class ChatTask extends BaseTask {
         ? buildTaskCancelKeyboard(this.record.id)
         : buildTaskRetryKeyboard(this.record.id);
 
-    await this.dependencies.api.editMessageReplyMarkup(
-      this.record.chatId,
-      messageId,
-      {
-        reply_markup: replyMarkup,
-      }
-    ).catch((error) => {
-      if (isGrammyMessageNotModifiedError(error)) {
-        return;
-      }
+    await Promise.all(
+      normalizedMessageIds.map((messageId) =>
+        this.dependencies.api.editMessageReplyMarkup(
+          this.record.chatId,
+          messageId,
+          {
+            reply_markup: replyMarkup,
+          }
+        ).catch((error) => {
+          if (isGrammyMessageNotModifiedError(error)) {
+            return;
+          }
 
-      logError("TASK_REPLY_CONTROLS", error, {
-        taskId: this.record.id,
-        messageId,
-        mode,
-      });
-    });
+          logError("TASK_REPLY_CONTROLS", error, {
+            taskId: this.record.id,
+            messageId,
+            mode,
+          });
+        })
+      )
+    );
   }
 
   private ensureSignalIsActive(signal: AbortSignal) {
