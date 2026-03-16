@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9232ce68-05e4-48e0-ae14-f3f2a26572ea",
-  "prevId": "3a79c18a-9783-4f5b-a2e6-37b523540a9c",
+  "id": "abf3f523-4435-455b-ad9d-d6bd18ac4ef9",
+  "prevId": "f7bc2296-646c-4a04-85bb-617db84bd6d1",
   "tables": {
     "chat_participants": {
       "name": "chat_participants",
@@ -268,6 +268,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "parentMessageId": {
+          "name": "parentMessageId",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "referenceMessageId": {
+          "name": "referenceMessageId",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "role": {
           "name": "role",
           "type": "text",
@@ -413,6 +427,20 @@
             "telegramMessageId"
           ],
           "isUnique": false
+        },
+        "messages_parent_message_idx": {
+          "name": "messages_parent_message_idx",
+          "columns": [
+            "parentMessageId"
+          ],
+          "isUnique": false
+        },
+        "messages_reference_message_idx": {
+          "name": "messages_reference_message_idx",
+          "columns": [
+            "referenceMessageId"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
@@ -438,6 +466,205 @@
           ],
           "columnsTo": [
             "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "sticker_sets": {
+      "name": "sticker_sets",
+      "columns": {
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "stickerType": {
+          "name": "stickerType",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "createdByUserId": {
+          "name": "createdByUserId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "sticker_sets_updated_at_idx": {
+          "name": "sticker_sets_updated_at_idx",
+          "columns": [
+            "updatedAt"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "sticker_sets_createdByUserId_users_id_fk": {
+          "name": "sticker_sets_createdByUserId_users_id_fk",
+          "tableFrom": "sticker_sets",
+          "tableTo": "users",
+          "columnsFrom": [
+            "createdByUserId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "stickers": {
+      "name": "stickers",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "setName": {
+          "name": "setName",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "fileId": {
+          "name": "fileId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "fileUniqueId": {
+          "name": "fileUniqueId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "emoji": {
+          "name": "emoji",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "width": {
+          "name": "width",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "height": {
+          "name": "height",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "isAnimated": {
+          "name": "isAnimated",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "isVideo": {
+          "name": "isVideo",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "stickers_set_name_idx": {
+          "name": "stickers_set_name_idx",
+          "columns": [
+            "setName"
+          ],
+          "isUnique": false
+        },
+        "stickers_file_unique_id_idx": {
+          "name": "stickers_file_unique_id_idx",
+          "columns": [
+            "fileUniqueId"
+          ],
+          "isUnique": false
+        },
+        "stickers_emoji_idx": {
+          "name": "stickers_emoji_idx",
+          "columns": [
+            "emoji"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "stickers_setName_sticker_sets_name_fk": {
+          "name": "stickers_setName_sticker_sets_name_fk",
+          "tableFrom": "stickers",
+          "tableTo": "sticker_sets",
+          "columnsFrom": [
+            "setName"
+          ],
+          "columnsTo": [
+            "name"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"

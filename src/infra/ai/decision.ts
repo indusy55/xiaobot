@@ -7,6 +7,18 @@ import {
 import { z } from "zod";
 import type { TaskContextMessage } from "../../tasks/types.js";
 
+const stickerIntentSchema = z.object({
+  send: z.boolean(),
+  stickerId: z.number().int().positive().nullable(),
+  reason: z.string().max(200),
+});
+
+const responseModeSchema = z.enum([
+  "text",
+  "text_with_sticker",
+  "sticker_only",
+]);
+
 const conversationModeSchema = z.object({
   mode: z.enum(["continue", "new", "fork_from_message"]),
   anchorMessageId: z.number().int().positive().nullable(),
@@ -30,26 +42,13 @@ export const webSearchDecisionSchema = z.object({
   reason: z.string().max(200),
 });
 
-export const capabilityDecisionSchema = z.object({
-  shouldSearch: z.boolean(),
-  query: z.string().max(256).nullable(),
-  shouldReadWebpage: z.boolean(),
-  webpageReadMode: z.enum(["none", "direct_url", "search_result"]),
-  directUrl: z.string().url().max(2048).nullable(),
-  reason: z.string().max(200),
-});
-
-export const webpageReadDecisionSchema = z.object({
-  shouldRead: z.boolean(),
-  url: z.string().url().max(2048).nullable(),
-  reason: z.string().max(200),
-});
-
 export const chatDecisionSchema = z.object({
   action: z.enum(["respond", "ignore"]),
+  responseMode: responseModeSchema,
   replyMode: z.enum(["reply_to_message", "send_message", "silent"]),
   replyToMessageId: z.number().int().positive().nullable(),
   targetUserId: z.string().nullable(),
+  sticker: stickerIntentSchema,
   conversation: conversationModeSchema,
   taskActions: z
     .array(z.discriminatedUnion("type", [cancelTaskActionSchema, enqueueTaskActionSchema]))
@@ -61,18 +60,13 @@ export const chatDecisionSchema = z.object({
 export type ChatDecision = z.infer<typeof chatDecisionSchema>;
 export type ChatTaskAction = ChatDecision["taskActions"][number];
 export type WebSearchDecision = z.infer<typeof webSearchDecisionSchema>;
-export type CapabilityDecision = z.infer<typeof capabilityDecisionSchema>;
-export type WebpageReadDecision = z.infer<typeof webpageReadDecisionSchema>;
-
-export interface WebpageCandidateUrl {
-  url: string;
-  source:
-    | "trigger_message"
-    | "replied_message"
-    | "conversation_message"
-    | "search_result";
-  title?: string | null;
-  snippet?: string | null;
+export interface ChatDecisionStickerCandidate {
+  id: number;
+  emoji: string | null;
+  setName: string;
+  setTitle: string;
+  isAnimated: boolean;
+  isVideo: boolean;
 }
 
 interface BuildDecisionMessagesOptions {
@@ -82,6 +76,7 @@ interface BuildDecisionMessagesOptions {
   recentChatMessages: TaskContextMessage[];
   triggerMessage: TaskContextMessage | null;
   repliedMessage: TaskContextMessage | null;
+  availableStickers?: ChatDecisionStickerCandidate[];
 }
 
 interface SanitizeDecisionOptions {
@@ -91,19 +86,11 @@ interface SanitizeDecisionOptions {
   repliedTelegramMessageId: number | null;
   conversationMessages: TaskContextMessage[];
   recentChatMessages: TaskContextMessage[];
+  availableStickerIds?: Set<number>;
 }
 
 interface SanitizeWebSearchDecisionOptions {
   fallbackQuery: string | null;
-}
-
-interface SanitizeCapabilityDecisionOptions {
-  fallbackQuery: string | null;
-  directCandidateUrls: string[];
-}
-
-interface SanitizeWebpageReadDecisionOptions {
-  candidateUrls: string[];
 }
 
 const CHAT_DECISION_SYSTEM_PROMPT = [
@@ -113,46 +100,15 @@ const CHAT_DECISION_SYSTEM_PROMPT = [
   "Do not invent message ids or user ids.",
   "Return exactly one JSON object with these fields:",
   "- action",
+  "- responseMode",
   "- replyMode",
   "- replyToMessageId",
   "- targetUserId",
+  "- sticker",
   "- conversation",
   "- taskActions",
   "- responseBrief",
   "- decisionNote",
-].join("\n");
-
-const CAPABILITY_DECISION_SYSTEM_PROMPT = [
-  "Decide which external capabilities should be used before the final reply.",
-  "Use capabilities only when they materially improve the answer.",
-  "Use search for web lookup or fresh public information.",
-  "Use webpage reading only when actual page contents are needed.",
-  "If a direct URL is already available and should be inspected, prefer direct_url.",
-  "Return exactly one JSON object with these fields:",
-  "- shouldSearch",
-  "- query",
-  "- shouldReadWebpage",
-  "- webpageReadMode",
-  "- directUrl",
-  "- reason",
-].join("\n");
-
-const WEB_SEARCH_DECISION_SYSTEM_PROMPT = [
-  "Decide whether web search is needed before the final reply.",
-  "Use search only when it materially improves the answer.",
-  "Return exactly one JSON object with these fields:",
-  "- shouldSearch",
-  "- query",
-  "- reason",
-].join("\n");
-
-const WEBPAGE_READ_DECISION_SYSTEM_PROMPT = [
-  "Decide whether a webpage should be read before the final reply.",
-  "Read a webpage only when its actual contents are needed.",
-  "Return exactly one JSON object with these fields:",
-  "- shouldRead",
-  "- url",
-  "- reason",
 ].join("\n");
 
 function cleanValue(value: string | null | undefined) {
@@ -245,6 +201,56 @@ function getCandidateReplyMessageIds(messages: TaskContextMessage[]) {
     .filter((messageId): messageId is number => typeof messageId === "number");
 }
 
+function buildStickerCandidatesPayload(
+  stickers: ChatDecisionStickerCandidate[] | undefined
+) {
+  if (!stickers || stickers.length === 0) {
+    return [];
+  }
+
+  return stickers.slice(0, 24).map((sticker) => ({
+    id: sticker.id,
+    emoji: sticker.emoji,
+    set_name: sticker.setName,
+    set_title: sticker.setTitle,
+    is_animated: sticker.isAnimated,
+    is_video: sticker.isVideo,
+  }));
+}
+
+function sanitizeStickerIntent(
+  sticker: ChatDecision["sticker"],
+  allowedStickerIds: Set<number>
+) {
+  const stickerId =
+    sticker.send &&
+    sticker.stickerId != null &&
+    allowedStickerIds.has(sticker.stickerId)
+      ? sticker.stickerId
+      : null;
+
+  return {
+    send: sticker.send && stickerId != null,
+    stickerId,
+    reason: sticker.reason.trim(),
+  };
+}
+
+function sanitizeResponseMode(
+  responseMode: ChatDecision["responseMode"],
+  sticker: ReturnType<typeof sanitizeStickerIntent>
+) {
+  if (!sticker.send) {
+    return "text" as const;
+  }
+
+  if (responseMode === "sticker_only") {
+    return "sticker_only" as const;
+  }
+
+  return "text_with_sticker" as const;
+}
+
 function sanitizeConversationMode(
   conversation: ChatDecision["conversation"],
   options: SanitizeDecisionOptions,
@@ -325,6 +331,7 @@ export function buildChatDecisionMessages(
     recentChatMessages,
     triggerMessage,
     repliedMessage,
+    availableStickers,
   } = options;
   const payload = {
     conversation_id: conversationId,
@@ -339,6 +346,7 @@ export function buildChatDecisionMessages(
     candidate_reply_message_ids: getCandidateReplyMessageIds(conversationMessages),
     trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
     replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
+    available_stickers: buildStickerCandidatesPayload(availableStickers),
     participants: buildParticipants(recentChatMessages),
     current_conversation_messages: conversationMessages.map(serializeMessage),
     recent_chat_messages: recentChatMessages.slice(-12).map(serializeMessage),
@@ -349,114 +357,6 @@ export function buildChatDecisionMessages(
     new SystemMessage(runtimeContextPrompt),
     new HumanMessage(
       `Decide the next Telegram bot action for the latest message.\nContext JSON:\n${JSON.stringify(
-        payload,
-        null,
-        2
-      )}`
-    ),
-  ];
-}
-
-export function buildWebSearchDecisionMessages(options: BuildDecisionMessagesOptions) {
-  const {
-    runtimeContextPrompt,
-    conversationId,
-    conversationMessages,
-    recentChatMessages,
-    triggerMessage,
-    repliedMessage,
-  } = options;
-  const payload = {
-    conversation_id: conversationId,
-    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
-    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
-    current_conversation_messages: conversationMessages
-      .slice(-10)
-      .map(serializeMessage),
-    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
-  };
-
-  return [
-    new SystemMessage(WEB_SEARCH_DECISION_SYSTEM_PROMPT),
-    new SystemMessage(runtimeContextPrompt),
-    new HumanMessage(
-      `Decide whether web search is needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
-        payload,
-        null,
-        2
-      )}`
-    ),
-  ];
-}
-
-export function buildCapabilityDecisionMessages(
-  options: BuildDecisionMessagesOptions & {
-    directCandidateUrls: WebpageCandidateUrl[];
-  }
-) {
-  const {
-    runtimeContextPrompt,
-    conversationId,
-    conversationMessages,
-    recentChatMessages,
-    triggerMessage,
-    repliedMessage,
-    directCandidateUrls,
-  } = options;
-  const payload = {
-    conversation_id: conversationId,
-    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
-    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
-    current_conversation_messages: conversationMessages
-      .slice(-10)
-      .map(serializeMessage),
-    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
-    direct_candidate_urls: directCandidateUrls,
-  };
-
-  return [
-    new SystemMessage(CAPABILITY_DECISION_SYSTEM_PROMPT),
-    new SystemMessage(runtimeContextPrompt),
-    new HumanMessage(
-      `Decide which external capabilities are needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
-        payload,
-        null,
-        2
-      )}`
-    ),
-  ];
-}
-
-export function buildWebpageReadDecisionMessages(
-  options: BuildDecisionMessagesOptions & {
-    candidateUrls: WebpageCandidateUrl[];
-  }
-) {
-  const {
-    runtimeContextPrompt,
-    conversationId,
-    conversationMessages,
-    recentChatMessages,
-    triggerMessage,
-    repliedMessage,
-    candidateUrls,
-  } = options;
-  const payload = {
-    conversation_id: conversationId,
-    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
-    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
-    current_conversation_messages: conversationMessages
-      .slice(-10)
-      .map(serializeMessage),
-    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
-    candidate_urls: candidateUrls,
-  };
-
-  return [
-    new SystemMessage(WEBPAGE_READ_DECISION_SYSTEM_PROMPT),
-    new SystemMessage(runtimeContextPrompt),
-    new HumanMessage(
-      `Decide whether a webpage should be read before answering the latest message.\nContext JSON:\n${JSON.stringify(
         payload,
         null,
         2
@@ -478,6 +378,11 @@ export function sanitizeChatDecision(
       .filter((value): value is string => value != null)
   );
   const responseBrief = decision.responseBrief.trim();
+  const sticker = sanitizeStickerIntent(
+    decision.sticker,
+    options.availableStickerIds ?? new Set<number>()
+  );
+  const responseMode = sanitizeResponseMode(decision.responseMode, sticker);
   const targetUserId =
     decision.targetUserId && allowedUserIds.has(decision.targetUserId)
       ? decision.targetUserId
@@ -496,9 +401,15 @@ export function sanitizeChatDecision(
   if (decision.action === "ignore") {
     return {
       ...decision,
+      responseMode: "text" as const,
       replyMode: "silent" as const,
       replyToMessageId: null,
       targetUserId,
+      sticker: {
+        send: false,
+        stickerId: null,
+        reason: sticker.reason,
+      },
       conversation,
       taskActions,
       responseBrief,
@@ -531,9 +442,11 @@ export function sanitizeChatDecision(
 
   return {
     ...decision,
+    responseMode,
     replyMode,
     replyToMessageId,
     targetUserId,
+    sticker,
     conversation,
     taskActions,
     responseBrief,
@@ -561,89 +474,19 @@ export function sanitizeWebSearchDecision(
   };
 }
 
-export function sanitizeCapabilityDecision(
-  decision: CapabilityDecision,
-  options: SanitizeCapabilityDecisionOptions
-) {
-  const directCandidateUrlSet = new Set(options.directCandidateUrls);
-  const query = cleanValue(decision.query) ?? options.fallbackQuery;
-  const directUrl = cleanValue(decision.directUrl);
-
-  const shouldSearch = decision.shouldSearch && query != null;
-  const sanitizedQuery = shouldSearch ? query.slice(0, 256) : null;
-
-  if (!decision.shouldReadWebpage || decision.webpageReadMode === "none") {
-    return {
-      ...decision,
-      shouldSearch,
-      query: sanitizedQuery,
-      shouldReadWebpage: false,
-      webpageReadMode: "none" as const,
-      directUrl: null,
-    };
-  }
-
-  if (decision.webpageReadMode === "direct_url") {
-    if (directUrl == null || !directCandidateUrlSet.has(directUrl)) {
-      return {
-        ...decision,
-        shouldSearch,
-        query: sanitizedQuery,
-        shouldReadWebpage: false,
-        webpageReadMode: "none" as const,
-        directUrl: null,
-      };
-    }
-
-    return {
-      ...decision,
-      shouldSearch,
-      query: sanitizedQuery,
-      shouldReadWebpage: true,
-      webpageReadMode: "direct_url" as const,
-      directUrl,
-    };
-  }
-
-  return {
-    ...decision,
-    shouldSearch,
-    query: sanitizedQuery,
-    shouldReadWebpage: shouldSearch,
-    webpageReadMode: shouldSearch ? "search_result" as const : "none" as const,
-    directUrl: null,
-  };
-}
-
-export function sanitizeWebpageReadDecision(
-  decision: WebpageReadDecision,
-  options: SanitizeWebpageReadDecisionOptions
-) {
-  const allowedUrls = new Set(options.candidateUrls);
-  const url = cleanValue(decision.url);
-
-  if (!decision.shouldRead || url == null || !allowedUrls.has(url)) {
-    return {
-      ...decision,
-      shouldRead: false,
-      url: null,
-    };
-  }
-
-  return {
-    ...decision,
-    shouldRead: true,
-    url,
-  };
-}
-
 export function buildFallbackChatDecision(triggerTelegramMessageId: number | null): ChatDecision {
   return {
     action: "respond",
+    responseMode: "text",
     replyMode:
       triggerTelegramMessageId == null ? "send_message" : "reply_to_message",
     replyToMessageId: triggerTelegramMessageId,
     targetUserId: null,
+    sticker: {
+      send: false,
+      stickerId: null,
+      reason: "Fallback decision",
+    },
     conversation: {
       mode: "continue",
       anchorMessageId: null,
@@ -651,75 +494,6 @@ export function buildFallbackChatDecision(triggerTelegramMessageId: number | nul
     taskActions: [],
     responseBrief: "",
     decisionNote: "Fallback decision",
-  };
-}
-
-export function buildFastPathChatDecision(options: {
-  triggerTelegramMessageId: number | null;
-  triggerUserId: string | null;
-  replyToMessageId?: number | null;
-  responseBrief?: string;
-}) {
-  const replyToMessageId =
-    options.replyToMessageId ?? options.triggerTelegramMessageId;
-
-  return {
-    action: "respond" as const,
-    replyMode:
-      replyToMessageId == null ? "send_message" as const : "reply_to_message" as const,
-    replyToMessageId,
-    targetUserId: options.triggerUserId,
-    conversation: {
-      mode: "continue" as const,
-      anchorMessageId: null,
-    },
-    taskActions: [],
-    responseBrief:
-      options.responseBrief?.trim() || "Answer the latest user message helpfully.",
-    decisionNote: "Fast path decision",
-  };
-}
-
-export function buildFallbackWebSearchDecision(): WebSearchDecision {
-  return {
-    shouldSearch: false,
-    query: null,
-    reason: "Fallback decision",
-  };
-}
-
-export function buildFallbackCapabilityDecision(options?: {
-  directCandidateUrls?: string[];
-}): CapabilityDecision {
-  const directUrl =
-    options?.directCandidateUrls?.find((value) => cleanValue(value) != null) ?? null;
-
-  if (directUrl != null) {
-    return {
-      shouldSearch: false,
-      query: null,
-      shouldReadWebpage: true,
-      webpageReadMode: "direct_url",
-      directUrl,
-      reason: "Fallback direct URL decision",
-    };
-  }
-
-  return {
-    shouldSearch: false,
-    query: null,
-    shouldReadWebpage: false,
-    webpageReadMode: "none",
-    directUrl: null,
-    reason: "Fallback decision",
-  };
-}
-
-export function buildFallbackWebpageReadDecision(): WebpageReadDecision {
-  return {
-    shouldRead: false,
-    url: null,
-    reason: "Fallback decision",
   };
 }
 
@@ -761,26 +535,306 @@ function findJsonObject(text: string) {
   return text.slice(start, end + 1);
 }
 
+function normalizeEnumValue(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : null;
+}
+
+function normalizeAction(value: unknown) {
+  const normalized = normalizeEnumValue(value);
+  switch (normalized) {
+    case "respond":
+    case "reply":
+    case "answer":
+    case "send":
+    case "回复":
+    case "回答":
+    case "发送":
+      return "respond" as const;
+    case "ignore":
+    case "silent":
+    case "skip":
+    case "none":
+    case "忽略":
+    case "跳过":
+    case "不回复":
+      return "ignore" as const;
+    default:
+      return "respond" as const;
+  }
+}
+
+function normalizeResponseMode(value: unknown) {
+  const normalized = normalizeEnumValue(value);
+  switch (normalized) {
+    case "text":
+    case "message":
+    case "text_only":
+    case "文本":
+    case "纯文本":
+      return "text" as const;
+    case "text_with_sticker":
+    case "text+sticker":
+    case "message_with_sticker":
+    case "mixed":
+    case "图文":
+    case "文本加贴纸":
+    case "文字加贴纸":
+      return "text_with_sticker" as const;
+    case "sticker_only":
+    case "sticker":
+    case "only_sticker":
+    case "send_sticker":
+    case "贴纸":
+    case "只发贴纸":
+      return "sticker_only" as const;
+    default:
+      return "text" as const;
+  }
+}
+
+function normalizeReplyMode(value: unknown) {
+  const normalized = normalizeEnumValue(value);
+  switch (normalized) {
+    case "reply_to_message":
+    case "reply":
+    case "reply_to":
+    case "回复":
+    case "回复消息":
+      return "reply_to_message" as const;
+    case "send_message":
+    case "send":
+    case "message":
+    case "发送":
+    case "发送消息":
+      return "send_message" as const;
+    case "silent":
+    case "ignore":
+    case "none":
+    case "静默":
+    case "不回复":
+      return "silent" as const;
+    default:
+      return "send_message" as const;
+  }
+}
+
+function normalizeConversation(
+  value: unknown
+): ChatDecision["conversation"] | unknown {
+  if (typeof value === "string") {
+    const normalized = normalizeEnumValue(value);
+    if (
+      normalized === "continue" ||
+      normalized === "new" ||
+      normalized === "fork_from_message" ||
+      normalized === "继续"
+    ) {
+      return {
+        mode: normalized === "继续" ? "continue" : normalized,
+        anchorMessageId: null,
+      };
+    }
+
+    if (
+      normalized === "fork" ||
+      normalized === "分叉" ||
+      normalized === "fork_from" ||
+      normalized === "branch"
+    ) {
+      return {
+        mode: "fork_from_message" as const,
+        anchorMessageId: null,
+      };
+    }
+
+    if (
+      normalized === "new" ||
+      normalized === "新对话" ||
+      normalized === "重新开始"
+    ) {
+      return {
+        mode: "new" as const,
+        anchorMessageId: null,
+      };
+    }
+
+    return {
+      mode: "continue" as const,
+      anchorMessageId: null,
+    };
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return {
+      mode: "continue" as const,
+      anchorMessageId: null,
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  return {
+    mode: (() => {
+      const normalizedMode = normalizeEnumValue(record.mode);
+      if (
+        normalizedMode === "continue" ||
+        normalizedMode === "继续" ||
+        normalizedMode == null
+      ) {
+        return "continue" as const;
+      }
+
+      if (
+        normalizedMode === "new" ||
+        normalizedMode === "新对话" ||
+        normalizedMode === "重新开始"
+      ) {
+        return "new" as const;
+      }
+
+      if (
+        normalizedMode === "fork" ||
+        normalizedMode === "fork_from_message" ||
+        normalizedMode === "分叉" ||
+        normalizedMode === "branch"
+      ) {
+        return "fork_from_message" as const;
+      }
+
+      return "continue" as const;
+    })(),
+    anchorMessageId:
+      typeof record.anchorMessageId === "number"
+        ? record.anchorMessageId
+        : typeof record.anchor_message_id === "number"
+          ? record.anchor_message_id
+          : typeof record.anchorMessageId === "string" &&
+              /^\d+$/.test(record.anchorMessageId)
+            ? Number(record.anchorMessageId)
+            : typeof record.anchor_message_id === "string" &&
+                /^\d+$/.test(record.anchor_message_id)
+              ? Number(record.anchor_message_id)
+          : null,
+  };
+}
+
+function normalizeStickerIntent(
+  value: unknown,
+  responseMode: unknown
+): ChatDecision["sticker"] | unknown {
+  const normalizedResponseMode = normalizeResponseMode(responseMode);
+
+  if (typeof value === "boolean") {
+    return {
+      send: value,
+      stickerId: null,
+      reason: "",
+    };
+  }
+
+  if (typeof value === "number") {
+    return {
+      send: true,
+      stickerId: value,
+      reason: "",
+    };
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return {
+      send: normalizedResponseMode !== "text",
+      stickerId: null,
+      reason: "",
+    };
+  }
+
+  const record = value as Record<string, unknown>;
+  const rawStickerId =
+    typeof record.stickerId === "number"
+      ? record.stickerId
+      : typeof record.sticker_id === "number"
+        ? record.sticker_id
+        : typeof record.stickerId === "string" && /^\d+$/.test(record.stickerId)
+          ? Number(record.stickerId)
+          : typeof record.sticker_id === "string" &&
+              /^\d+$/.test(record.sticker_id)
+            ? Number(record.sticker_id)
+        : null;
+  const rawSend =
+    typeof record.send === "boolean"
+      ? record.send
+      : rawStickerId != null || normalizedResponseMode !== "text";
+
+  return {
+    send: rawSend,
+    stickerId: rawStickerId,
+    reason:
+      typeof record.reason === "string"
+        ? record.reason
+        : typeof record.note === "string"
+          ? record.note
+          : "",
+  };
+}
+
+function normalizeTaskActions(value: unknown) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeString(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function normalizeNullableString(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
+function normalizeNullableNumber(value: unknown) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+
+  return null;
+}
+
+function normalizeRawChatDecision(value: unknown) {
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const action = normalizeAction(record.action);
+  const responseMode = normalizeResponseMode(record.responseMode);
+
+  return {
+    action,
+    responseMode,
+    replyMode: normalizeReplyMode(record.replyMode),
+    replyToMessageId:
+      normalizeNullableNumber(record.replyToMessageId) ??
+      normalizeNullableNumber(record.reply_to_message_id),
+    targetUserId:
+      normalizeNullableString(record.targetUserId) ??
+      normalizeNullableString(record.target_user_id),
+    sticker: normalizeStickerIntent(record.sticker, responseMode),
+    conversation: normalizeConversation(record.conversation),
+    taskActions: normalizeTaskActions(record.taskActions ?? record.task_actions),
+    responseBrief:
+      normalizeString(record.responseBrief) ||
+      normalizeString(record.response_brief),
+    decisionNote:
+      normalizeString(record.decisionNote) ||
+      normalizeString(record.decision_note),
+  };
+}
+
 export function parseChatDecisionResponse(message: AIMessage) {
   const text = extractTextContent(message.content).trim();
   const jsonText = findJsonObject(text);
-  return chatDecisionSchema.parse(JSON.parse(jsonText));
-}
-
-export function parseWebSearchDecisionResponse(message: AIMessage) {
-  const text = extractTextContent(message.content).trim();
-  const jsonText = findJsonObject(text);
-  return webSearchDecisionSchema.parse(JSON.parse(jsonText));
-}
-
-export function parseCapabilityDecisionResponse(message: AIMessage) {
-  const text = extractTextContent(message.content).trim();
-  const jsonText = findJsonObject(text);
-  return capabilityDecisionSchema.parse(JSON.parse(jsonText));
-}
-
-export function parseWebpageReadDecisionResponse(message: AIMessage) {
-  const text = extractTextContent(message.content).trim();
-  const jsonText = findJsonObject(text);
-  return webpageReadDecisionSchema.parse(JSON.parse(jsonText));
+  return chatDecisionSchema.parse(
+    normalizeRawChatDecision(JSON.parse(jsonText))
+  );
 }

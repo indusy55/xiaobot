@@ -16,11 +16,9 @@ let cachedPrompt: string | null = null;
 
 const CHAT_RESPONSE_SYSTEM_GUIDANCE = [
   "Response rules:",
-  "- Answer the latest user request with the context you were actually given.",
-  "- Use provided runtime context, search context, webpage context, and media context honestly.",
-  "- Do not pretend you read a webpage, opened a link, searched the web, or inspected media unless the current system context actually includes that result.",
-  "- If such content was not retrieved yet, say it was not retrieved yet instead of claiming it is impossible in principle.",
-  "- Do not make up facts that are missing from the provided context.",
+  "- Answer the latest user request using only the context you were actually given.",
+  "- Do not claim to have performed actions or retrieved content unless that result is present in the current system context.",
+  "- If needed information is missing, say it is missing instead of making it up.",
 ].join("\n");
 
 export async function readChatPrompt() {

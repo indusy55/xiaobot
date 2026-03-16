@@ -24,6 +24,8 @@ const taskContextMessageSelection = {
   fromLastName: messagesTable.fromLastName,
   fromLanguageCode: messagesTable.fromLanguageCode,
   telegramMessageId: messagesTable.telegramMessageId,
+  parentMessageId: messagesTable.parentMessageId,
+  referenceMessageId: messagesTable.referenceMessageId,
   createdAt: messagesTable.createdAt,
 } as const;
 
@@ -121,6 +123,59 @@ export abstract class BaseTask {
 
   protected async loadContext(limit = 20): Promise<TaskContextMessage[]> {
     const anchorMessageId = getAnchorMessageId(this.task.conversationId);
+    const triggerTelegramMessageId = this.task.triggerTelegramMessageId;
+    if (triggerTelegramMessageId != null) {
+      const [triggerRow] = await db
+        .select(taskContextMessageSelection)
+        .from(messagesTable)
+        .where(
+          and(
+            eq(messagesTable.chatId, this.task.chatId),
+            eq(messagesTable.telegramMessageId, triggerTelegramMessageId)
+          )
+        )
+        .limit(1);
+
+      if (triggerRow) {
+        const collected: TaskContextMessage[] = [];
+        const visited = new Set<number>();
+        let currentRow = triggerRow as TaskContextMessage;
+
+        while (
+          currentRow &&
+          collected.length < limit &&
+          !visited.has(currentRow.id)
+        ) {
+          collected.push(currentRow);
+          visited.add(currentRow.id);
+
+          if (
+            anchorMessageId != null &&
+            currentRow.telegramMessageId === anchorMessageId
+          ) {
+            break;
+          }
+
+          if (currentRow.parentMessageId == null) {
+            break;
+          }
+
+          const [parentRow] = await db
+            .select(taskContextMessageSelection)
+            .from(messagesTable)
+            .where(eq(messagesTable.id, currentRow.parentMessageId))
+            .limit(1);
+
+          if (!parentRow) {
+            break;
+          }
+
+          currentRow = parentRow as TaskContextMessage;
+        }
+
+        return collected.reverse();
+      }
+    }
     const conversationRows = await db
       .select(taskContextMessageSelection)
       .from(messagesTable)
@@ -134,7 +189,7 @@ export abstract class BaseTask {
       .limit(anchorMessageId == null ? limit : Math.max(limit - 1, 0));
 
     if (anchorMessageId == null) {
-      return conversationRows.reverse();
+      return conversationRows.reverse() as TaskContextMessage[];
     }
 
     const [anchorRow] = await db
@@ -148,7 +203,7 @@ export abstract class BaseTask {
       )
       .limit(1);
 
-    const rows = conversationRows.reverse();
+    const rows = conversationRows.reverse() as TaskContextMessage[];
     if (!anchorRow) {
       return rows;
     }
@@ -205,6 +260,32 @@ export abstract class BaseTask {
       .limit(limit);
 
     return rows.reverse() as TaskContextMessage[];
+  }
+
+  protected async loadRecentConversationTaskSnapshots(limit = 5) {
+    if (limit <= 0) {
+      return [];
+    }
+
+    const rows = await db
+      .select({
+        id: tasksTable.id,
+        status: tasksTable.status,
+        contextSnapshot: tasksTable.contextSnapshot,
+        createdAt: tasksTable.createdAt,
+      })
+      .from(tasksTable)
+      .where(
+        and(
+          eq(tasksTable.conversationId, this.task.conversationId),
+          eq(tasksTable.chatId, this.task.chatId),
+          lt(tasksTable.createdAt, this.task.createdAt)
+        )
+      )
+      .orderBy(desc(tasksTable.createdAt))
+      .limit(limit);
+
+    return rows;
   }
 
   protected async loadMessageByTelegramMessageId(

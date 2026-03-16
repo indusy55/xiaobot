@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { messagesTable } from "../db/schema.js";
 
@@ -7,6 +7,9 @@ interface StoredMessageConversation {
   conversationId: string;
   telegramMessageId: number | null;
   replyToTelegramMessageId: number | null;
+  parentMessageId: number | null;
+  referenceMessageId: number | null;
+  createdAt: number;
 }
 
 interface MessageHistoryInspection {
@@ -31,6 +34,9 @@ async function findMessageByTelegramMessageId(
       conversationId: messagesTable.conversationId,
       telegramMessageId: messagesTable.telegramMessageId,
       replyToTelegramMessageId: messagesTable.replyToTelegramMessageId,
+      parentMessageId: messagesTable.parentMessageId,
+      referenceMessageId: messagesTable.referenceMessageId,
+      createdAt: messagesTable.createdAt,
     })
     .from(messagesTable)
     .where(
@@ -43,6 +49,99 @@ async function findMessageByTelegramMessageId(
     .limit(1);
 
   return message as StoredMessageConversation | undefined;
+}
+
+export async function findPersistedMessageByTelegramMessageId(
+  chatId: string,
+  telegramMessageId: number,
+  threadId?: number
+) {
+  const message = await findMessageByTelegramMessageId(
+    chatId,
+    telegramMessageId,
+    threadId
+  );
+
+  return message ?? null;
+}
+
+export async function findLatestConversationMessage(options: {
+  chatId: string;
+  conversationId: string;
+  threadId?: number;
+  excludeTelegramMessageId?: number;
+}) {
+  const { chatId, conversationId, threadId, excludeTelegramMessageId } = options;
+  const [message] = await db
+    .select({
+      id: messagesTable.id,
+      conversationId: messagesTable.conversationId,
+      telegramMessageId: messagesTable.telegramMessageId,
+      replyToTelegramMessageId: messagesTable.replyToTelegramMessageId,
+      parentMessageId: messagesTable.parentMessageId,
+      referenceMessageId: messagesTable.referenceMessageId,
+      createdAt: messagesTable.createdAt,
+    })
+    .from(messagesTable)
+    .where(
+      and(
+        eq(messagesTable.chatId, chatId),
+        eq(messagesTable.conversationId, conversationId),
+        buildThreadScopeCondition(threadId),
+        excludeTelegramMessageId == null
+          ? undefined
+          : ne(messagesTable.telegramMessageId, excludeTelegramMessageId)
+      )
+    )
+    .orderBy(desc(messagesTable.createdAt), desc(messagesTable.id))
+    .limit(1);
+
+  return (message as StoredMessageConversation | undefined) ?? null;
+}
+
+export async function updateMessageContextLinks(options: {
+  chatId: string;
+  telegramMessageId: number;
+  threadId?: number;
+  conversationId?: string;
+  parentTelegramMessageId?: number | null;
+  referenceTelegramMessageId?: number | null;
+}) {
+  const {
+    chatId,
+    telegramMessageId,
+    threadId,
+    conversationId,
+    parentTelegramMessageId,
+    referenceTelegramMessageId,
+  } = options;
+  const parentMessage =
+    parentTelegramMessageId == null
+      ? null
+      : await findMessageByTelegramMessageId(chatId, parentTelegramMessageId, threadId);
+  const referenceMessage =
+    referenceTelegramMessageId == null
+      ? null
+      : await findMessageByTelegramMessageId(
+          chatId,
+          referenceTelegramMessageId,
+          threadId
+        );
+
+  await db
+    .update(messagesTable)
+    .set({
+      ...(conversationId == null ? {} : { conversationId }),
+      parentMessageId: parentMessage?.id ?? null,
+      referenceMessageId: referenceMessage?.id ?? null,
+    })
+    .where(
+      and(
+        eq(messagesTable.chatId, chatId),
+        eq(messagesTable.telegramMessageId, telegramMessageId),
+        buildThreadScopeCondition(threadId)
+      )
+    );
 }
 
 export async function assignConversationIdToMessage(

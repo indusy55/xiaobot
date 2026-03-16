@@ -159,6 +159,21 @@ const envSchema = z.object({
       .max(16, "TASK_WORKER_CONCURRENCY must be at most 16")
       .default(2)
   ),
+  CHAT_DECISION_TIMEOUT_MS: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("CHAT_DECISION_TIMEOUT_MS must be an integer")
+      .positive("CHAT_DECISION_TIMEOUT_MS must be greater than 0")
+      .default(10_000)
+  ),
   CHAT_CONTEXT_LIMIT: z.preprocess(
     (value) => {
       if (typeof value !== "string" || value.trim().length === 0) {
@@ -220,37 +235,6 @@ const envSchema = z.object({
       .min(1, "WEB_SEARCH_RESULT_LIMIT must be at least 1")
       .max(10, "WEB_SEARCH_RESULT_LIMIT must be at most 10")
       .default(5)
-  ),
-  WEBPAGE_READ_TIMEOUT_MS: z.preprocess(
-    (value) => {
-      if (typeof value !== "string" || value.trim().length === 0) {
-        return undefined;
-      }
-
-      const parsed = Number(value);
-      return Number.isNaN(parsed) ? value : parsed;
-    },
-    z
-      .number()
-      .int("WEBPAGE_READ_TIMEOUT_MS must be an integer")
-      .positive("WEBPAGE_READ_TIMEOUT_MS must be greater than 0")
-      .default(20_000)
-  ),
-  WEBPAGE_MAX_CONTENT_CHARS: z.preprocess(
-    (value) => {
-      if (typeof value !== "string" || value.trim().length === 0) {
-        return undefined;
-      }
-
-      const parsed = Number(value);
-      return Number.isNaN(parsed) ? value : parsed;
-    },
-    z
-      .number()
-      .int("WEBPAGE_MAX_CONTENT_CHARS must be an integer")
-      .min(500, "WEBPAGE_MAX_CONTENT_CHARS must be at least 500")
-      .max(50_000, "WEBPAGE_MAX_CONTENT_CHARS must be at most 50000")
-      .default(12_000)
   ),
   TELEGRAM_MEDIA_CACHE_DIR: z.preprocess(
     (value) => {

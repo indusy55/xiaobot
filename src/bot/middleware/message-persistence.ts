@@ -247,6 +247,8 @@ async function persistMessage(message: TelegramEntity, options: {
       telegramUpdateId: options.telegramUpdateId,
       replyToTelegramMessageId:
         options.replyToTelegramMessageId ?? getReplyToMessageId(message),
+      parentMessageId: null,
+      referenceMessageId: null,
       role: options.role,
       contentType: getContentType(message),
       fromId: userId,

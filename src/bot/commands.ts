@@ -13,4 +13,8 @@ export const botCommands: BotCommand[] = [
     command: "cancel",
     description: "Cancel the current task",
   },
+  {
+    command: "add_setstickerset",
+    description: "Add a sticker set for the bot",
+  },
 ];

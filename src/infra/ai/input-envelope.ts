@@ -8,8 +8,7 @@ interface BuildChatInputEnvelopeOptions {
   runtimeContext: string;
   backlogSummary?: string | null;
   responsePlan: string;
-  webSearchContext?: string | null;
-  webpageReadContext?: string | null;
+  toolContext?: string | null;
 }
 
 function buildSection(title: string, body: string | null | undefined) {
@@ -48,8 +47,7 @@ export function buildChatInputEnvelope(options: BuildChatInputEnvelopeOptions) {
     buildSection("LATEST_REQUEST", latestRequestLines.join("\n")),
     buildSection("RUNTIME_CONTEXT", options.runtimeContext),
     buildSection("CONVERSATION_BACKLOG", options.backlogSummary),
-    buildSection("WEB_SEARCH_CONTEXT", options.webSearchContext),
-    buildSection("WEBPAGE_CONTEXT", options.webpageReadContext),
+    buildSection("TOOL_CONTEXT", options.toolContext),
     buildSection("RESPONSE_PLAN", options.responsePlan),
   ].filter((section): section is string => section != null);
 
@@ -59,7 +57,7 @@ export function buildChatInputEnvelope(options: BuildChatInputEnvelopeOptions) {
       "- Treat LATEST_REQUEST as the primary thing to answer.",
       "- Use RUNTIME_CONTEXT and prior messages only as supporting context.",
       "- Use CONVERSATION_BACKLOG only as compressed older context.",
-      "- Use WEB_SEARCH_CONTEXT and WEBPAGE_CONTEXT only when they materially help.",
+      "- Use TOOL_CONTEXT only when it materially helps.",
       "- Follow RESPONSE_PLAN for who to address and how to reply.",
     ].join("\n")
   );

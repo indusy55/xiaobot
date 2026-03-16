@@ -1,6 +1,8 @@
 import {
   assignConversationIdToMessages,
+  findLatestConversationMessage,
   inspectMessageHistory,
+  updateMessageContextLinks,
 } from "../conversation-store.js";
 import {
   buildAnchoredConversationId,
@@ -202,6 +204,8 @@ async function resolveChatConversation(options: {
         anchorConversationToMessageId
       ),
       messageIdsToAssign: [telegramMessageId],
+      parentTelegramMessageId: anchorConversationToMessageId,
+      referenceTelegramMessageId: anchorConversationToMessageId,
     };
   }
 
@@ -209,6 +213,8 @@ async function resolveChatConversation(options: {
     return {
       conversationId: buildAnchoredConversationId(baseConversationId, telegramMessageId),
       messageIdsToAssign: [telegramMessageId],
+      parentTelegramMessageId: null,
+      referenceTelegramMessageId: null,
     };
   }
 
@@ -216,6 +222,8 @@ async function resolveChatConversation(options: {
     return {
       conversationId: baseConversationId,
       messageIdsToAssign: [telegramMessageId],
+      parentTelegramMessageId: undefined,
+      referenceTelegramMessageId: null,
     };
   }
 
@@ -233,6 +241,8 @@ async function resolveChatConversation(options: {
   return {
     conversationId,
     messageIdsToAssign: [...history.messageIds, telegramMessageId],
+    parentTelegramMessageId: undefined,
+    referenceTelegramMessageId: replyToTelegramMessageId,
   };
 }
 
@@ -287,7 +297,12 @@ export function setupChatHandler(bot: AppBot) {
         : undefined;
 
     try {
-      const { conversationId, messageIdsToAssign } = await resolveChatConversation({
+      const {
+        conversationId,
+        messageIdsToAssign,
+        parentTelegramMessageId,
+        referenceTelegramMessageId,
+      } = await resolveChatConversation({
         chatId,
         chatType: ctx.chat.type,
         threadId,
@@ -305,6 +320,27 @@ export function setupChatHandler(bot: AppBot) {
         conversationId,
         threadId
       );
+
+      const effectiveParentTelegramMessageId =
+        parentTelegramMessageId === undefined
+          ? (
+              await findLatestConversationMessage({
+                chatId,
+                conversationId,
+                ...(threadId == null ? {} : { threadId }),
+                excludeTelegramMessageId: message.message_id,
+              })
+            )?.telegramMessageId ?? null
+          : parentTelegramMessageId;
+
+      await updateMessageContextLinks({
+        chatId,
+        telegramMessageId: message.message_id,
+        conversationId,
+        ...(threadId == null ? {} : { threadId }),
+        parentTelegramMessageId: effectiveParentTelegramMessageId,
+        referenceTelegramMessageId,
+      });
 
       await enqueueChatTask({
         conversationId,

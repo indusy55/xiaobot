@@ -13,15 +13,14 @@ describe("buildChatInputEnvelope", () => {
       runtimeContext: "Runtime chat context:\n- Chat type: supergroup",
       backlogSummary: "Earlier conversation summary:\n- Omitted earlier messages: 4",
       responsePlan: "Response plan:\n- Reply mode: reply_to_message",
-      webSearchContext: "Fresh web search context:\n- Query: Telegram Bot API latest",
-      webpageReadContext: null,
+      toolContext: "Tool context:\n- Search query: Telegram Bot API latest",
     });
 
     expect(envelope).toContain("[LATEST_REQUEST]");
     expect(envelope).toContain("What changed in Telegram Bot API this week?");
     expect(envelope).toContain("[RUNTIME_CONTEXT]");
     expect(envelope).toContain("[CONVERSATION_BACKLOG]");
-    expect(envelope).toContain("[WEB_SEARCH_CONTEXT]");
+    expect(envelope).toContain("[TOOL_CONTEXT]");
     expect(envelope).toContain("[RESPONSE_PLAN]");
     expect(envelope).toContain("[INPUT_RULES]");
   });

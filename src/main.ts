@@ -26,6 +26,7 @@ function main() {
 			chatModel,
 			decisionModel,
 			taskTimeoutMs: cfg.TASK_TIMEOUT_MS,
+			chatDecisionTimeoutMs: cfg.CHAT_DECISION_TIMEOUT_MS,
 			chatContextLimit: cfg.CHAT_CONTEXT_LIMIT,
 			chatContextSummaryLimit: cfg.CHAT_CONTEXT_SUMMARY_LIMIT,
 			telegramMediaCacheDir: cfg.TELEGRAM_MEDIA_CACHE_DIR,

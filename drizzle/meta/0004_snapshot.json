@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9232ce68-05e4-48e0-ae14-f3f2a26572ea",
-  "prevId": "3a79c18a-9783-4f5b-a2e6-37b523540a9c",
+  "id": "f7bc2296-646c-4a04-85bb-617db84bd6d1",
+  "prevId": "9232ce68-05e4-48e0-ae14-f3f2a26572ea",
   "tables": {
     "chat_participants": {
       "name": "chat_participants",
@@ -268,6 +268,20 @@
           "notNull": false,
           "autoincrement": false
         },
+        "parentMessageId": {
+          "name": "parentMessageId",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "referenceMessageId": {
+          "name": "referenceMessageId",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "role": {
           "name": "role",
           "type": "text",
@@ -411,6 +425,20 @@
           "columns": [
             "chatId",
             "telegramMessageId"
+          ],
+          "isUnique": false
+        },
+        "messages_parent_message_idx": {
+          "name": "messages_parent_message_idx",
+          "columns": [
+            "parentMessageId"
+          ],
+          "isUnique": false
+        },
+        "messages_reference_message_idx": {
+          "name": "messages_reference_message_idx",
+          "columns": [
+            "referenceMessageId"
           ],
           "isUnique": false
         }

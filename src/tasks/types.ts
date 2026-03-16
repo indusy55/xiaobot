@@ -51,6 +51,8 @@ export interface TaskContextMessage {
   fromLastName: string | null;
   fromLanguageCode: string | null;
   telegramMessageId: number | null;
+  parentMessageId?: number | null;
+  referenceMessageId?: number | null;
   createdAt: number;
 }
 
@@ -82,6 +84,7 @@ export interface TaskDependencies {
   decisionModel: ChatOpenAI;
   taskRuntime: TaskRuntime;
   taskTimeoutMs: number;
+  chatDecisionTimeoutMs: number;
   chatContextLimit: number;
   chatContextSummaryLimit: number;
   telegramMediaCacheDir: string;

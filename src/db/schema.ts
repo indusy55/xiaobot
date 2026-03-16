@@ -70,6 +70,8 @@ export const messagesTable = sqliteTable(
     telegramMessageId: int(),
     telegramUpdateId: int(),
     replyToTelegramMessageId: int(),
+    parentMessageId: int(),
+    referenceMessageId: int(),
     role: text({ enum: ["user", "assistant", "system", "tool"] }).notNull(),
     contentType: text().notNull(),
     fromId: text(),
@@ -95,6 +97,8 @@ export const messagesTable = sqliteTable(
     index("messages_chat_created_at_idx").on(table.chatId, table.createdAt),
     index("messages_user_created_at_idx").on(table.userId, table.createdAt),
     index("messages_telegram_message_idx").on(table.chatId, table.telegramMessageId),
+    index("messages_parent_message_idx").on(table.parentMessageId),
+    index("messages_reference_message_idx").on(table.referenceMessageId),
   ]
 );
 
@@ -128,5 +132,42 @@ export const tasksTable = sqliteTable(
       table.createdAt
     ),
     index("tasks_chat_created_at_idx").on(table.chatId, table.createdAt),
+  ]
+);
+
+export const stickerSetsTable = sqliteTable(
+  "sticker_sets",
+  {
+    name: text().primaryKey(),
+    title: text().notNull(),
+    stickerType: text().notNull(),
+    createdByUserId: text().references(() => usersTable.id),
+    createdAt: int().notNull(),
+    updatedAt: int().notNull(),
+  },
+  (table) => [index("sticker_sets_updated_at_idx").on(table.updatedAt)]
+);
+
+export const stickersTable = sqliteTable(
+  "stickers",
+  {
+    id: int().primaryKey({ autoIncrement: true }),
+    setName: text()
+      .notNull()
+      .references(() => stickerSetsTable.name),
+    fileId: text().notNull(),
+    fileUniqueId: text().notNull(),
+    emoji: text(),
+    width: int(),
+    height: int(),
+    isAnimated: int({ mode: "boolean" }).notNull().default(false),
+    isVideo: int({ mode: "boolean" }).notNull().default(false),
+    createdAt: int().notNull(),
+    updatedAt: int().notNull(),
+  },
+  (table) => [
+    index("stickers_set_name_idx").on(table.setName),
+    index("stickers_file_unique_id_idx").on(table.fileUniqueId),
+    index("stickers_emoji_idx").on(table.emoji),
   ]
 );

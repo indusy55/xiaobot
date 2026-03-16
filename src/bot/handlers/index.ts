@@ -1,5 +1,6 @@
 import type { ChatOpenAI } from "@langchain/openai";
 import { TaskWorker } from "../../tasks/index.js";
+import { setupAddSticketsetHandler } from "./add-sticketset.js";
 import { setupAiPingHandler } from "./ai-ping.js";
 import { setupChatHandler } from "./chat.js";
 import { setupPingHandler } from "./ping.js";
@@ -14,6 +15,7 @@ export function setupHandlers(
 ) {
   setupPingHandler(bot);
   setupAiPingHandler(bot, chatModel);
+  setupAddSticketsetHandler(bot);
   setupTaskControlHandler(bot, taskWorker);
   setupTaskButtonHandler(bot, taskWorker);
   setupChatHandler(bot);
