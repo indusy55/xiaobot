@@ -1,4 +1,3 @@
-import type { Bot } from "grammy";
 import { db } from "../../db/index.js";
 import {
   chatParticipantsTable,
@@ -8,6 +7,7 @@ import {
 } from "../../db/schema.js";
 import { logError } from "../../infra/error/index.js";
 import { buildConversationId } from "../conversation.js";
+import type { AppBot } from "../types.js";
 
 type TelegramEntity = Record<string, unknown>;
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -262,7 +262,7 @@ async function persistMessage(message: TelegramEntity, options: {
   });
 }
 
-export function setupMessagePersistenceMiddleware(bot: Bot) {
+export function setupMessagePersistenceMiddleware(bot: AppBot) {
   bot.on("message", async (ctx, next) => {
     const chatId = String(ctx.chat.id);
     const userId = ctx.from ? String(ctx.from.id) : undefined;

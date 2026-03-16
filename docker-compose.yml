@@ -3,10 +3,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      - searxng
     env_file:
       - .env
     environment:
       DATABASE_URL: file:/app/data/local.db
+      SEARXNG_BASE_URL: http://searxng:8080
     volumes:
       - ./data:/app/data
+    restart: unless-stopped
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./data/searxng:/var/cache/searxng
     restart: unless-stopped

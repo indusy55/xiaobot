@@ -1,5 +1,8 @@
-import { Bot } from "grammy";
+import { hydrateFiles } from "@grammyjs/files";
+import { Bot, type BotError } from "grammy";
+import type { UserFromGetMe } from "grammy/types";
 import { botCommands } from "./bot/commands.js";
+import type { AppApi, AppContext } from "./bot/types.js";
 import { setupHandlers } from "./bot/handlers/index.js";
 import { setupMessageLoggerMiddleware } from "./bot/middleware/message-logger.js";
 import { setupMessagePersistenceMiddleware } from "./bot/middleware/message-persistence.js";
@@ -13,7 +16,8 @@ function main() {
 	try {
 		const cfg = loadConfig();
 
-		const bot = new Bot(cfg.BOT_TOKEN);
+		const bot = new Bot<AppContext, AppApi>(cfg.BOT_TOKEN);
+		bot.api.config.use(hydrateFiles(bot.token));
 		const chatModel = createChatModel(cfg);
 		const decisionModel = createDecisionModel(cfg);
 		let taskWorker: TaskWorker;
@@ -22,6 +26,8 @@ function main() {
 			chatModel,
 			decisionModel,
 			taskTimeoutMs: cfg.TASK_TIMEOUT_MS,
+			chatContextLimit: cfg.CHAT_CONTEXT_LIMIT,
+			telegramMediaCacheDir: cfg.TELEGRAM_MEDIA_CACHE_DIR,
 			taskRuntime: {
 				enqueueChatTask,
 				requestCancelLatest: (scope) => taskWorker.requestCancelLatest(scope),
@@ -33,7 +39,7 @@ function main() {
 		setupHandlers(bot, taskWorker, chatModel);
 		taskWorker.startPolling();
 
-		bot.catch((err) => {
+		bot.catch((err: BotError<AppContext>) => {
 			logError("BOT_RUNTIME", err.error, {
 				updateId: err.ctx.update.update_id,
 				chatId: err.ctx.chat?.id,
@@ -42,7 +48,7 @@ function main() {
 		});
 
 		bot.start({
-			onStart: async (botInfo) => {
+			onStart: async (botInfo: UserFromGetMe) => {
 				await bot.api.setMyCommands(botCommands);
 				logger.info(`Bot [${botInfo.username}] started`);
 			},

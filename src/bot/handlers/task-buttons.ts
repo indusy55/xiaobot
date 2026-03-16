@@ -1,8 +1,8 @@
-import type { Bot } from "grammy";
 import { buildTaskRetryKeyboard, parseTaskControlCallback } from "../task-controls.js";
 import { TaskWorker } from "../../tasks/index.js";
+import type { AppBot } from "../types.js";
 
-export function setupTaskButtonHandler(bot: Bot, taskWorker: TaskWorker) {
+export function setupTaskButtonHandler(bot: AppBot, taskWorker: TaskWorker) {
   bot.on("callback_query:data", async (ctx, next) => {
     const control = parseTaskControlCallback(ctx.callbackQuery.data);
     if (!control) {

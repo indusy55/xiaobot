@@ -9,6 +9,11 @@ interface StoredMessageConversation {
   replyToTelegramMessageId: number | null;
 }
 
+interface MessageHistoryInspection {
+  conversationId: string | null;
+  messageIds: number[];
+}
+
 function buildThreadScopeCondition(threadId?: number) {
   return threadId == null
     ? isNull(messagesTable.threadId)
@@ -94,7 +99,28 @@ export async function resolveConversationIdFromMessageHistory(options: {
 }) {
   const { chatId, threadId, telegramMessageId, baseConversationId, maxDepth = 20 } =
     options;
+  const inspection = await inspectMessageHistory({
+    chatId,
+    telegramMessageId,
+    baseConversationId,
+    maxDepth,
+    ...(threadId == null ? {} : { threadId }),
+  });
+
+  return inspection.conversationId;
+}
+
+export async function inspectMessageHistory(options: {
+  chatId: string;
+  threadId?: number;
+  telegramMessageId: number;
+  baseConversationId: string;
+  maxDepth?: number;
+}): Promise<MessageHistoryInspection> {
+  const { chatId, threadId, telegramMessageId, baseConversationId, maxDepth = 20 } =
+    options;
   const visited = new Set<number>();
+  const messageIds: number[] = [];
 
   let currentMessageId: number | null = telegramMessageId;
 
@@ -104,6 +130,7 @@ export async function resolveConversationIdFromMessageHistory(options: {
     visited.size < maxDepth
   ) {
     visited.add(currentMessageId);
+    messageIds.push(currentMessageId);
 
     const message = await findMessageByTelegramMessageId(
       chatId,
@@ -111,15 +138,24 @@ export async function resolveConversationIdFromMessageHistory(options: {
       threadId
     );
     if (!message) {
-      return null;
+      return {
+        conversationId: null,
+        messageIds,
+      };
     }
 
     if (message.conversationId !== baseConversationId) {
-      return message.conversationId;
+      return {
+        conversationId: message.conversationId,
+        messageIds,
+      };
     }
 
     currentMessageId = message.replyToTelegramMessageId;
   }
 
-  return null;
+  return {
+    conversationId: null,
+    messageIds,
+  };
 }

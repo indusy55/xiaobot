@@ -1,7 +1,7 @@
-import type { Bot } from "grammy";
 import { TaskWorker } from "../../tasks/index.js";
 import { resolveConversationIdFromMessageHistory } from "../conversation-store.js";
 import { buildConversationId } from "../conversation.js";
+import type { AppBot } from "../types.js";
 
 function parseTaskId(text: string) {
   const parts = text.trim().split(/\s+/);
@@ -13,7 +13,7 @@ function parseTaskId(text: string) {
   return Number.isInteger(taskId) && taskId > 0 ? taskId : undefined;
 }
 
-export function setupTaskControlHandler(bot: Bot, taskWorker: TaskWorker) {
+export function setupTaskControlHandler(bot: AppBot, taskWorker: TaskWorker) {
   bot.command("cancel", async (ctx) => {
     const threadId =
       typeof ctx.msg.message_thread_id === "number"

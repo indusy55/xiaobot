@@ -24,6 +24,20 @@ const enqueueTaskActionSchema = z.object({
   conversationMode: conversationModeSchema,
 });
 
+export const webSearchDecisionSchema = z.object({
+  version: z.literal(1),
+  shouldSearch: z.boolean(),
+  query: z.string().max(256).nullable(),
+  reason: z.string().max(200),
+});
+
+export const webpageReadDecisionSchema = z.object({
+  version: z.literal(1),
+  shouldRead: z.boolean(),
+  url: z.string().url().max(2048).nullable(),
+  reason: z.string().max(200),
+});
+
 export const chatDecisionSchema = z.object({
   version: z.literal(1),
   action: z.enum(["respond", "ignore"]),
@@ -40,6 +54,19 @@ export const chatDecisionSchema = z.object({
 
 export type ChatDecision = z.infer<typeof chatDecisionSchema>;
 export type ChatTaskAction = ChatDecision["taskActions"][number];
+export type WebSearchDecision = z.infer<typeof webSearchDecisionSchema>;
+export type WebpageReadDecision = z.infer<typeof webpageReadDecisionSchema>;
+
+export interface WebpageCandidateUrl {
+  url: string;
+  source:
+    | "trigger_message"
+    | "replied_message"
+    | "conversation_message"
+    | "search_result";
+  title?: string | null;
+  snippet?: string | null;
+}
 
 interface BuildDecisionMessagesOptions {
   decisionPrompt: string;
@@ -57,6 +84,14 @@ interface SanitizeDecisionOptions {
   triggerUserId: string | null;
   repliedTelegramMessageId: number | null;
   recentChatMessages: TaskContextMessage[];
+}
+
+interface SanitizeWebSearchDecisionOptions {
+  fallbackQuery: string | null;
+}
+
+interface SanitizeWebpageReadDecisionOptions {
+  candidateUrls: string[];
 }
 
 function cleanValue(value: string | null | undefined) {
@@ -262,6 +297,78 @@ export function buildChatDecisionMessages(
   ];
 }
 
+export function buildWebSearchDecisionMessages(options: BuildDecisionMessagesOptions) {
+  const {
+    decisionPrompt,
+    runtimeContextPrompt,
+    conversationId,
+    conversationMessages,
+    recentChatMessages,
+    triggerMessage,
+    repliedMessage,
+  } = options;
+  const payload = {
+    conversation_id: conversationId,
+    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
+    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
+    current_conversation_messages: conversationMessages
+      .slice(-10)
+      .map(serializeMessage),
+    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
+  };
+
+  return [
+    new SystemMessage(decisionPrompt),
+    new SystemMessage(runtimeContextPrompt),
+    new HumanMessage(
+      `Decide whether web search is needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
+        payload,
+        null,
+        2
+      )}`
+    ),
+  ];
+}
+
+export function buildWebpageReadDecisionMessages(
+  options: BuildDecisionMessagesOptions & {
+    candidateUrls: WebpageCandidateUrl[];
+  }
+) {
+  const {
+    decisionPrompt,
+    runtimeContextPrompt,
+    conversationId,
+    conversationMessages,
+    recentChatMessages,
+    triggerMessage,
+    repliedMessage,
+    candidateUrls,
+  } = options;
+  const payload = {
+    conversation_id: conversationId,
+    trigger_message: triggerMessage ? serializeMessage(triggerMessage) : null,
+    replied_message: repliedMessage ? serializeMessage(repliedMessage) : null,
+    current_conversation_messages: conversationMessages
+      .slice(-10)
+      .map(serializeMessage),
+    recent_chat_messages: recentChatMessages.slice(-8).map(serializeMessage),
+    candidate_urls: candidateUrls,
+  };
+
+  return [
+    new SystemMessage(decisionPrompt),
+    new SystemMessage(runtimeContextPrompt),
+    new HumanMessage(
+      `Decide whether a webpage should be read before answering the latest message.\nContext JSON:\n${JSON.stringify(
+        payload,
+        null,
+        2
+      )}`
+    ),
+  ];
+}
+
 export function sanitizeChatDecision(
   decision: ChatDecision,
   options: SanitizeDecisionOptions
@@ -337,6 +444,49 @@ export function sanitizeChatDecision(
   };
 }
 
+export function sanitizeWebSearchDecision(
+  decision: WebSearchDecision,
+  options: SanitizeWebSearchDecisionOptions
+) {
+  const query = cleanValue(decision.query) ?? options.fallbackQuery;
+
+  if (!decision.shouldSearch || query == null) {
+    return {
+      ...decision,
+      shouldSearch: false,
+      query: null,
+    };
+  }
+
+  return {
+    ...decision,
+    shouldSearch: true,
+    query: query.slice(0, 256),
+  };
+}
+
+export function sanitizeWebpageReadDecision(
+  decision: WebpageReadDecision,
+  options: SanitizeWebpageReadDecisionOptions
+) {
+  const allowedUrls = new Set(options.candidateUrls);
+  const url = cleanValue(decision.url);
+
+  if (!decision.shouldRead || url == null || !allowedUrls.has(url)) {
+    return {
+      ...decision,
+      shouldRead: false,
+      url: null,
+    };
+  }
+
+  return {
+    ...decision,
+    shouldRead: true,
+    url,
+  };
+}
+
 export function buildFallbackChatDecision(triggerTelegramMessageId: number | null): ChatDecision {
   return {
     version: 1,
@@ -375,6 +525,24 @@ export function buildFastPathChatDecision(options: {
     responseBrief:
       options.responseBrief?.trim() || "Answer the latest user message helpfully.",
     decisionNote: "Fast path decision",
+  };
+}
+
+export function buildFallbackWebSearchDecision(): WebSearchDecision {
+  return {
+    version: 1,
+    shouldSearch: false,
+    query: null,
+    reason: "Fallback decision",
+  };
+}
+
+export function buildFallbackWebpageReadDecision(): WebpageReadDecision {
+  return {
+    version: 1,
+    shouldRead: false,
+    url: null,
+    reason: "Fallback decision",
   };
 }
 
@@ -420,4 +588,16 @@ export function parseChatDecisionResponse(message: AIMessage) {
   const text = extractTextContent(message.content).trim();
   const jsonText = findJsonObject(text);
   return chatDecisionSchema.parse(JSON.parse(jsonText));
+}
+
+export function parseWebSearchDecisionResponse(message: AIMessage) {
+  const text = extractTextContent(message.content).trim();
+  const jsonText = findJsonObject(text);
+  return webSearchDecisionSchema.parse(JSON.parse(jsonText));
+}
+
+export function parseWebpageReadDecisionResponse(message: AIMessage) {
+  const text = extractTextContent(message.content).trim();
+  const jsonText = findJsonObject(text);
+  return webpageReadDecisionSchema.parse(JSON.parse(jsonText));
 }

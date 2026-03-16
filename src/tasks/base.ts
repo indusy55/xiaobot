@@ -1,6 +1,7 @@
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { messagesTable, tasksTable } from "../db/schema.js";
+import { getAnchorMessageId } from "../bot/conversation.js";
 import type {
   TaskContextMessage,
   TaskDependencies,
@@ -15,6 +16,7 @@ const taskContextMessageSelection = {
   chatTitle: messagesTable.chatTitle,
   contentType: messagesTable.contentType,
   textContent: messagesTable.textContent,
+  rawMessage: messagesTable.rawMessage,
   replyToTelegramMessageId: messagesTable.replyToTelegramMessageId,
   fromId: messagesTable.fromId,
   fromUsername: messagesTable.fromUsername,
@@ -118,19 +120,25 @@ export abstract class BaseTask {
   protected abstract execute(signal: AbortSignal): Promise<unknown>;
 
   protected async loadContext(limit = 20): Promise<TaskContextMessage[]> {
+    const anchorMessageId = getAnchorMessageId(this.task.conversationId);
     const rows = await db
       .select(taskContextMessageSelection)
       .from(messagesTable)
       .where(
         and(
-          eq(messagesTable.conversationId, this.task.conversationId),
+          or(
+            eq(messagesTable.conversationId, this.task.conversationId),
+            anchorMessageId == null
+              ? undefined
+              : eq(messagesTable.telegramMessageId, anchorMessageId)
+          ),
           eq(messagesTable.chatId, this.task.chatId)
         )
       )
-      .orderBy(asc(messagesTable.createdAt))
+      .orderBy(desc(messagesTable.createdAt))
       .limit(limit);
 
-    return rows;
+    return rows.reverse();
   }
 
   protected async loadRecentChatMessages(

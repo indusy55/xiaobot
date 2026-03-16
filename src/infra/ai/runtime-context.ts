@@ -1,4 +1,5 @@
 import type { TaskContextMessage } from "../../tasks/types.js";
+import { extractMessageQuote } from "../../bot/message-quote.js";
 
 interface BuildRuntimeContextPromptOptions {
   conversationMessages: TaskContextMessage[];
@@ -162,6 +163,19 @@ function buildReplyContextLine(repliedMessage: TaskContextMessage | null) {
   )}`;
 }
 
+function buildCurrentQuoteLine(triggerMessage: TaskContextMessage | null) {
+  if (!triggerMessage || triggerMessage.role !== "user") {
+    return null;
+  }
+
+  const quote = extractMessageQuote(triggerMessage.rawMessage);
+  if (!quote) {
+    return null;
+  }
+
+  return `- Current message quoted part: "${quote.text}"`;
+}
+
 function buildRecentTopicLine(
   triggerMessage: TaskContextMessage | null,
   recentChatMessages: TaskContextMessage[]
@@ -219,6 +233,7 @@ export function buildRuntimeContextPrompt(options: BuildRuntimeContextPromptOpti
     triggerMessage ?? conversationMessages[0] ?? recentChatMessages[0] ?? null;
   const participantLines = buildParticipantLines(recentChatMessages);
   const currentSpeakerLine = buildCurrentSpeakerLine(triggerMessage);
+  const currentQuoteLine = buildCurrentQuoteLine(triggerMessage);
   const replyContextLine = buildReplyContextLine(repliedMessage);
   const recentTopicLine = buildRecentTopicLine(triggerMessage, recentChatMessages);
   const lines = [
@@ -234,6 +249,10 @@ export function buildRuntimeContextPrompt(options: BuildRuntimeContextPromptOpti
 
   if (currentSpeakerLine) {
     lines.push(currentSpeakerLine);
+  }
+
+  if (currentQuoteLine) {
+    lines.push(currentQuoteLine);
   }
 
   if (replyContextLine) {

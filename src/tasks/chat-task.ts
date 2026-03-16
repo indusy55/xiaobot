@@ -10,29 +10,63 @@ import {
   getBaseConversationId,
 } from "../bot/conversation.js";
 import {
+  buildReplyQuoteParameters,
+  extractMessageQuote,
+} from "../bot/message-quote.js";
+import {
   buildTaskCancelKeyboard,
   buildTaskRetryKeyboard,
 } from "../bot/task-controls.js";
 import {
   buildFastPathChatDecision,
   buildChatDecisionMessages,
+  buildFallbackWebSearchDecision,
+  buildFallbackWebpageReadDecision,
   buildFallbackChatDecision,
+  buildWebSearchDecisionMessages,
+  buildWebpageReadDecisionMessages,
   parseChatDecisionResponse,
+  parseWebSearchDecisionResponse,
+  parseWebpageReadDecisionResponse,
   sanitizeChatDecision,
+  sanitizeWebSearchDecision,
+  sanitizeWebpageReadDecision,
   type ChatTaskAction,
+  type WebpageCandidateUrl,
 } from "../infra/ai/decision.js";
-import { readChatDecisionPrompt, readChatPrompt } from "../infra/ai/prompt.js";
+import {
+  readChatDecisionPrompt,
+  readChatPrompt,
+  readChatSearchDecisionPrompt,
+  readChatWebpageDecisionPrompt,
+} from "../infra/ai/prompt.js";
 import {
   buildRuntimeContextPrompt,
   formatMessageSpeakerPrefix,
 } from "../infra/ai/runtime-context.js";
 import {
+  type WebSearchContext,
+} from "../infra/search/searxng.js";
+import {
+  formatWebpageReadPrompt,
+  runReadWebpageTool,
+} from "../infra/tools/read-webpage.js";
+import {
+  formatWebSearchPrompt,
+  runWebSearchTool,
+} from "../infra/tools/web-search.js";
+import { resolveTelegramMessageImagePart } from "../infra/media/telegram-media.js";
+import {
   isGrammyMessageNotModifiedError,
   logError,
 } from "../infra/error/index.js";
+import { updatePersistedMessageText } from "../bot/message-store.js";
+import { deliverMarkdownV2Text } from "../bot/telegram-markdown.js";
 import { TelegramMessageStreamer } from "../bot/streaming/message-streamer.js";
 import { BaseTask } from "./base.js";
 import type { ChatTaskPayload, TaskContextMessage } from "./types.js";
+
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/gi;
 
 function toModelMessageContent(message: { contentType: string; textContent: string | null }) {
   if (typeof message.textContent === "string" && message.textContent.trim().length > 0) {
@@ -42,27 +76,78 @@ function toModelMessageContent(message: { contentType: string; textContent: stri
   return `[${message.contentType}]`;
 }
 
-function toLangChainMessages(
-  contextMessages: Awaited<ReturnType<BaseTask["loadContext"]>>
-): BaseMessage[] {
-  return contextMessages.map((message) => {
+async function toUserMessageContent(
+  dependencies: ChatTask["dependencies"],
+  message: Awaited<ReturnType<BaseTask["loadContext"]>>[number],
+  signal: AbortSignal
+) {
+  const content = toModelMessageContent(message);
+  const speakerPrefix = formatMessageSpeakerPrefix(message);
+  const finalUserContent =
+    speakerPrefix == null ? content : `${speakerPrefix}: ${content}`;
+  const imagePart = await resolveTelegramMessageImagePart({
+    api: dependencies.api,
+    cacheDir: dependencies.telegramMediaCacheDir,
+    rawMessage: message.rawMessage,
+    contentType: message.contentType,
+    signal,
+  }).catch(() => null);
+  const quote = extractMessageQuote(message.rawMessage);
+  const quoteLine =
+    quote == null ? null : `Quoted part: "${quote.text}"`;
+
+  const textParts: { type: "text"; text: string }[] = [
+    {
+      type: "text",
+      text: [
+        finalUserContent,
+        message.contentType === "sticker" && imagePart?.emoji
+          ? `Sticker emoji: ${imagePart.emoji}`
+          : null,
+        quoteLine,
+      ]
+        .filter((value): value is string => value != null)
+        .join("\n"),
+    },
+  ];
+
+  return imagePart == null ? finalUserContent : [...textParts, imagePart];
+}
+
+async function toLangChainMessages(
+  task: ChatTask,
+  contextMessages: Awaited<ReturnType<BaseTask["loadContext"]>>,
+  signal: AbortSignal
+): Promise<BaseMessage[]> {
+  const messages: BaseMessage[] = [];
+
+  for (const message of contextMessages) {
     const content = toModelMessageContent(message);
-    const speakerPrefix = formatMessageSpeakerPrefix(message);
-    const finalUserContent =
-      speakerPrefix == null ? content : `${speakerPrefix}: ${content}`;
 
     switch (message.role) {
       case "assistant":
-        return new AIMessage(content);
+        messages.push(new AIMessage(content));
+        break;
       case "system":
-        return new SystemMessage(content);
+        messages.push(new SystemMessage(content));
+        break;
       case "tool":
-        return new SystemMessage(`Tool output: ${content}`);
+        messages.push(new SystemMessage(`Tool output: ${content}`));
+        break;
       case "user":
-      default:
-        return new HumanMessage(finalUserContent);
+      default: {
+        const userContent = await toUserMessageContent(
+          task["dependencies"],
+          message,
+          signal
+        );
+        messages.push(new HumanMessage(userContent));
+        break;
+      }
     }
-  });
+  }
+
+  return messages;
 }
 
 function applyUserInputOverride(
@@ -137,6 +222,79 @@ function extractChunkText(content: unknown) {
 
 function extractMessageText(content: unknown) {
   return extractChunkText(content).trim();
+}
+
+function normalizeExtractedUrl(url: string) {
+  return url.replace(/[),.!?]+$/g, "").trim();
+}
+
+function extractUrlsFromText(text: string | null | undefined) {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    return [];
+  }
+
+  return [...text.matchAll(URL_PATTERN)]
+    .map((match) => normalizeExtractedUrl(match[0] ?? ""))
+    .filter((value) => value.length > 0);
+}
+
+function collectWebpageCandidateUrls(options: {
+  contextMessages: TaskContextMessage[];
+  triggerMessage: TaskContextMessage | null;
+  repliedMessage: TaskContextMessage | null;
+  webSearchContext: WebSearchContext | null;
+}) {
+  const candidates = new Map<string, WebpageCandidateUrl>();
+
+  const pushCandidate = (
+    url: string,
+    source: WebpageCandidateUrl["source"],
+    title?: string | null,
+    snippet?: string | null
+  ) => {
+    if (candidates.has(url)) {
+      return;
+    }
+
+    candidates.set(url, {
+      url,
+      source,
+      ...(title == null ? {} : { title }),
+      ...(snippet == null ? {} : { snippet }),
+    });
+  };
+
+  const pushMessageUrls = (
+    message: TaskContextMessage | null,
+    source: WebpageCandidateUrl["source"]
+  ) => {
+    if (message == null) {
+      return;
+    }
+
+    for (const url of extractUrlsFromText(message.textContent)) {
+      pushCandidate(url, source);
+    }
+  };
+
+  pushMessageUrls(options.triggerMessage, "trigger_message");
+  pushMessageUrls(options.repliedMessage, "replied_message");
+
+  for (const message of [...options.contextMessages].reverse()) {
+    for (const url of extractUrlsFromText(message.textContent)) {
+      pushCandidate(url, "conversation_message");
+    }
+  }
+
+  for (const result of options.webSearchContext?.results ?? []) {
+    if (!result.link) {
+      continue;
+    }
+
+    pushCandidate(result.link, "search_result", result.title, result.snippet);
+  }
+
+  return [...candidates.values()].slice(0, 8);
 }
 
 function buildResponsePlanPrompt(options: {
@@ -231,13 +389,39 @@ function resolveConversationId(options: {
   }
 }
 
+function decisionReplyParameters(
+  triggerMessage: TaskContextMessage | null,
+  repliedMessage: TaskContextMessage | null,
+  replyToMessageId: number | null
+) {
+  if (replyToMessageId == null) {
+    return null;
+  }
+
+  if (
+    triggerMessage?.replyToTelegramMessageId === replyToMessageId &&
+    repliedMessage?.telegramMessageId === replyToMessageId
+  ) {
+    return buildReplyQuoteParameters({
+      rawMessage: triggerMessage.rawMessage,
+      replyToMessageId,
+    });
+  }
+
+  return {
+    message_id: replyToMessageId,
+  };
+}
+
 export class ChatTask extends BaseTask {
   protected async execute(signal: AbortSignal) {
     this.ensureSignalIsActive(signal);
 
     const payload = this.parsePayload();
     const threadId = payload.threadId;
-    const rawContextMessages = await this.loadContext();
+    const rawContextMessages = await this.loadContext(
+      this.dependencies.chatContextLimit
+    );
     const contextMessages = applyUserInputOverride(
       rawContextMessages,
       this.record.triggerTelegramMessageId,
@@ -313,11 +497,73 @@ export class ChatTask extends BaseTask {
       threadId
     );
 
+    let webSearchContext: WebSearchContext | null = null;
+    let webpageReadContext: Awaited<ReturnType<typeof runReadWebpageTool>> | null =
+      null;
+    if (decision.action === "respond") {
+      const webSearchDecision = await this.decideWebSearch({
+        signal,
+        runtimeContextPrompt,
+        contextMessages,
+        recentChatMessages,
+        triggerMessage,
+        repliedMessage,
+        fallbackQuery: (payload.userInput ?? payload.text ?? "").trim(),
+      });
+
+      if (webSearchDecision.shouldSearch && webSearchDecision.query) {
+        try {
+          webSearchContext = await runWebSearchTool(webSearchDecision.query, {
+            signal,
+          });
+        } catch (error) {
+          logError("WEB_SEARCH", error, {
+            taskId: this.record.id,
+            chatId: this.record.chatId,
+            conversationId: effectiveConversationId,
+          });
+        }
+      }
+
+      const webpageCandidateUrls = collectWebpageCandidateUrls({
+        contextMessages,
+        triggerMessage,
+        repliedMessage,
+        webSearchContext,
+      });
+      const webpageReadDecision = await this.decideWebpageRead({
+        signal,
+        runtimeContextPrompt,
+        contextMessages,
+        recentChatMessages,
+        triggerMessage,
+        repliedMessage,
+        candidateUrls: webpageCandidateUrls,
+      });
+
+      if (webpageReadDecision.shouldRead && webpageReadDecision.url) {
+        try {
+          webpageReadContext = await runReadWebpageTool(webpageReadDecision.url, {
+            signal,
+          });
+        } catch (error) {
+          logError("WEBPAGE_READ", error, {
+            taskId: this.record.id,
+            chatId: this.record.chatId,
+            conversationId: effectiveConversationId,
+            url: webpageReadDecision.url,
+          });
+        }
+      }
+    }
+
     await this.saveContextSnapshot({
       triggerTelegramMessageId: this.record.triggerTelegramMessageId,
       decision,
       effectiveConversationId,
       taskActionResults,
+      webSearchContext,
+      webpageReadContext,
       messages: contextMessages,
     });
 
@@ -336,6 +582,12 @@ export class ChatTask extends BaseTask {
       };
     }
 
+    const effectiveReplyParameters = decisionReplyParameters(
+      triggerMessage,
+      repliedMessage,
+      decision.replyMode === "reply_to_message" ? decision.replyToMessageId : null
+    );
+
     const streamer = new TelegramMessageStreamer(this.dependencies.api, {
       chatId: this.record.chatId,
       ...(threadId == null ? {} : { messageThreadId: threadId }),
@@ -352,9 +604,8 @@ export class ChatTask extends BaseTask {
       editOptions: {
         reply_markup: buildTaskCancelKeyboard(this.record.id),
       },
-      ...(decision.replyMode === "reply_to_message" &&
-      decision.replyToMessageId != null
-        ? { replyToMessageId: decision.replyToMessageId }
+      ...(effectiveReplyParameters != null
+        ? { replyParameters: effectiveReplyParameters }
         : {}),
     });
 
@@ -370,9 +621,20 @@ export class ChatTask extends BaseTask {
       }
       await this.throwIfCancellationRequested();
       const systemPrompt = await readChatPrompt();
+      const contextModelMessages = await toLangChainMessages(
+        this,
+        contextMessages,
+        signal
+      );
       const modelMessages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
         new SystemMessage(runtimeContextPrompt),
+        ...(webSearchContext == null
+          ? []
+          : [new SystemMessage(formatWebSearchPrompt(webSearchContext))]),
+        ...(webpageReadContext == null
+          ? []
+          : [new SystemMessage(formatWebpageReadPrompt(webpageReadContext))]),
         new SystemMessage(
           buildResponsePlanPrompt({
             responseBrief: decision.responseBrief,
@@ -381,7 +643,7 @@ export class ChatTask extends BaseTask {
             targetUserId: decision.targetUserId,
           })
         ),
-        ...toLangChainMessages(contextMessages),
+        ...contextModelMessages,
       ];
       const responseMessage = await this.dependencies.chatModel.invoke(modelMessages, {
         signal,
@@ -390,8 +652,40 @@ export class ChatTask extends BaseTask {
         extractMessageText(responseMessage.content).length > 0
           ? extractMessageText(responseMessage.content)
           : "I could not generate a response.";
-      const finalState = await streamer.complete(finalText);
-      await this.switchReplyControls(finalState?.messageId ?? null, "retry");
+      const placeholderMessageId = streamer.state?.messageId ?? null;
+      if (placeholderMessageId == null) {
+        throw new Error("Missing placeholder message id");
+      }
+      const delivery = await deliverMarkdownV2Text({
+        api: this.dependencies.api,
+        chatId: this.record.chatId,
+        placeholderMessageId,
+        text: finalText,
+        ...(threadId == null ? {} : { messageThreadId: threadId }),
+        editOptions: {
+          reply_markup: buildTaskCancelKeyboard(this.record.id),
+        },
+      });
+      await streamer.complete();
+
+      for (const messageId of delivery.messageIds.slice(1)) {
+        await assignConversationIdToMessage(
+          this.record.chatId,
+          messageId,
+          effectiveConversationId,
+          threadId
+        );
+      }
+
+      if (delivery.primaryMessageId != null) {
+        await updatePersistedMessageText({
+          chatId: this.record.chatId,
+          telegramMessageId: delivery.primaryMessageId,
+          textContent: delivery.chunks[0]?.rawText ?? finalText,
+          ...(threadId == null ? {} : { threadId }),
+        });
+      }
+      await this.switchReplyControls(delivery.primaryMessageId, "retry");
 
       return {
         action: "respond",
@@ -399,17 +693,25 @@ export class ChatTask extends BaseTask {
         effectiveConversationId,
         messageCount: contextMessages.length,
         responseText: finalText,
-        responseMessageId: finalState?.messageId ?? null,
+        responseMessageId: delivery.primaryMessageId,
         taskActionResults,
         triggerTelegramMessageId: this.record.triggerTelegramMessageId,
       };
     } catch (error) {
-      if (await this.cancellationRequested()) {
-        await streamer.cancel("Task cancelled.");
-      } else if (this.isTimedOut()) {
-        await streamer.fail("Task timed out.");
-      } else {
-        await streamer.fail("Task failed.");
+      const terminalState =
+        (await this.cancellationRequested())
+          ? await streamer.cancel("Task cancelled.")
+          : this.isTimedOut()
+            ? await streamer.fail("Task timed out.")
+            : await streamer.fail("Task failed.");
+
+      if (terminalState?.messageId != null) {
+        await updatePersistedMessageText({
+          chatId: this.record.chatId,
+          telegramMessageId: terminalState.messageId,
+          textContent: terminalState.text,
+          ...(threadId == null ? {} : { threadId }),
+        });
       }
 
       await this.switchReplyControls(streamer.state?.messageId ?? null, "retry");
@@ -484,6 +786,127 @@ export class ChatTask extends BaseTask {
       });
 
       return buildFallbackChatDecision(this.record.triggerTelegramMessageId);
+    }
+  }
+
+  private async decideWebSearch(options: {
+    signal: AbortSignal;
+    runtimeContextPrompt: string;
+    contextMessages: TaskContextMessage[];
+    recentChatMessages: TaskContextMessage[];
+    triggerMessage: TaskContextMessage | null;
+    repliedMessage: TaskContextMessage | null;
+    fallbackQuery: string;
+  }) {
+    const {
+      signal,
+      runtimeContextPrompt,
+      contextMessages,
+      recentChatMessages,
+      triggerMessage,
+      repliedMessage,
+      fallbackQuery,
+    } = options;
+
+    if (fallbackQuery.trim().length === 0) {
+      return buildFallbackWebSearchDecision();
+    }
+
+    try {
+      const searchDecisionPrompt = await readChatSearchDecisionPrompt();
+      const decisionMessages = buildWebSearchDecisionMessages({
+        decisionPrompt: searchDecisionPrompt,
+        runtimeContextPrompt,
+        conversationId: this.record.conversationId,
+        conversationMessages: contextMessages,
+        recentChatMessages,
+        triggerMessage,
+        repliedMessage,
+      });
+      const decisionSignal = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(2500),
+      ]);
+      const decisionMessage = await this.dependencies.decisionModel.invoke(
+        decisionMessages,
+        {
+          signal: decisionSignal,
+        }
+      );
+      const rawDecision = parseWebSearchDecisionResponse(decisionMessage);
+
+      return sanitizeWebSearchDecision(rawDecision, {
+        fallbackQuery: fallbackQuery.trim(),
+      });
+    } catch (error) {
+      logError("WEB_SEARCH_DECISION", error, {
+        taskId: this.record.id,
+        conversationId: this.record.conversationId,
+        chatId: this.record.chatId,
+      });
+
+      return buildFallbackWebSearchDecision();
+    }
+  }
+
+  private async decideWebpageRead(options: {
+    signal: AbortSignal;
+    runtimeContextPrompt: string;
+    contextMessages: TaskContextMessage[];
+    recentChatMessages: TaskContextMessage[];
+    triggerMessage: TaskContextMessage | null;
+    repliedMessage: TaskContextMessage | null;
+    candidateUrls: WebpageCandidateUrl[];
+  }) {
+    const {
+      signal,
+      runtimeContextPrompt,
+      contextMessages,
+      recentChatMessages,
+      triggerMessage,
+      repliedMessage,
+      candidateUrls,
+    } = options;
+
+    if (candidateUrls.length === 0) {
+      return buildFallbackWebpageReadDecision();
+    }
+
+    try {
+      const webpageDecisionPrompt = await readChatWebpageDecisionPrompt();
+      const decisionMessages = buildWebpageReadDecisionMessages({
+        decisionPrompt: webpageDecisionPrompt,
+        runtimeContextPrompt,
+        conversationId: this.record.conversationId,
+        conversationMessages: contextMessages,
+        recentChatMessages,
+        triggerMessage,
+        repliedMessage,
+        candidateUrls,
+      });
+      const decisionSignal = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(2500),
+      ]);
+      const decisionMessage = await this.dependencies.decisionModel.invoke(
+        decisionMessages,
+        {
+          signal: decisionSignal,
+        }
+      );
+      const rawDecision = parseWebpageReadDecisionResponse(decisionMessage);
+
+      return sanitizeWebpageReadDecision(rawDecision, {
+        candidateUrls: candidateUrls.map((candidate) => candidate.url),
+      });
+    } catch (error) {
+      logError("WEBPAGE_READ_DECISION", error, {
+        taskId: this.record.id,
+        conversationId: this.record.conversationId,
+        chatId: this.record.chatId,
+      });
+
+      return buildFallbackWebpageReadDecision();
     }
   }
 

@@ -1,8 +1,8 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { ChatOpenAI } from "@langchain/openai";
-import type { Bot } from "grammy";
 import { readChatPrompt } from "../../infra/ai/prompt.js";
 import { logError } from "../../infra/error/index.js";
+import type { AppBot } from "../types.js";
 
 function extractText(content: unknown) {
   if (typeof content === "string") {
@@ -32,7 +32,7 @@ function extractText(content: unknown) {
     .trim();
 }
 
-export function setupAiPingHandler(bot: Bot, chatModel: ChatOpenAI) {
+export function setupAiPingHandler(bot: AppBot, chatModel: ChatOpenAI) {
   bot.command("ai_ping", async (ctx) => {
     try {
       await ctx.replyWithChatAction("typing").catch(() => undefined);

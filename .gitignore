@@ -16,6 +16,7 @@ dist/
 *.log
 *.tmp
 *.tsbuildinfo
+data/media-cache/
 
 .DS_Store
 Thumbs.db

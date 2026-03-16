@@ -29,3 +29,13 @@ export function getBaseConversationId(conversationId: string) {
 
   return conversationId.slice(0, anchorIndex);
 }
+
+export function getAnchorMessageId(conversationId: string) {
+  const anchorMatch = conversationId.match(/:anchor:(\d+)$/);
+  if (!anchorMatch) {
+    return null;
+  }
+
+  const anchorMessageId = Number(anchorMatch[1]);
+  return Number.isInteger(anchorMessageId) ? anchorMessageId : null;
+}

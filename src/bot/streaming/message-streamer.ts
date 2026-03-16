@@ -13,6 +13,7 @@ export interface TelegramMessageStreamerOptions {
   chatId: number | string;
   messageThreadId?: number;
   replyToMessageId?: number;
+  replyParameters?: SendMessageOptions["reply_parameters"];
   throttleMs?: number;
   minEditDelta?: number;
   boundaryMinDelta?: number;
@@ -221,9 +222,11 @@ export class TelegramMessageStreamer {
 
   private buildSendOptions(): SendMessageOptions {
     const replyParameters =
-      this.options.replyToMessageId == null
-        ? {}
-        : { reply_parameters: { message_id: this.options.replyToMessageId } };
+      this.options.replyParameters != null
+        ? { reply_parameters: this.options.replyParameters }
+        : this.options.replyToMessageId == null
+          ? {}
+          : { reply_parameters: { message_id: this.options.replyToMessageId } };
 
     const threadOptions =
       this.options.messageThreadId == null

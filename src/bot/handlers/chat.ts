@@ -1,7 +1,6 @@
-import type { Bot } from "grammy";
 import {
   assignConversationIdToMessages,
-  resolveConversationIdFromMessageHistory,
+  inspectMessageHistory,
 } from "../conversation-store.js";
 import {
   buildAnchoredConversationId,
@@ -9,6 +8,7 @@ import {
 } from "../conversation.js";
 import { logError } from "../../infra/error/index.js";
 import { enqueueChatTask } from "../../tasks/index.js";
+import type { AppBot } from "../types.js";
 
 type MessageEntity = {
   type: string;
@@ -17,8 +17,67 @@ type MessageEntity = {
   user?: { id: number };
 };
 
+type SupportedChatMessage = {
+  text?: string;
+  caption?: string;
+  entities?: readonly MessageEntity[];
+  caption_entities?: readonly MessageEntity[];
+  photo?: unknown[];
+  sticker?: { emoji?: string };
+  reply_to_message?: {
+    from?: { id?: number };
+    message_id?: number;
+  };
+  message_id: number;
+  message_thread_id?: number;
+};
+
+function getSupportedMessageText(message: SupportedChatMessage) {
+  if (typeof message.text === "string") {
+    return message.text;
+  }
+
+  if (typeof message.caption === "string") {
+    return message.caption;
+  }
+
+  if (message.sticker?.emoji) {
+    return message.sticker.emoji;
+  }
+
+  return "";
+}
+
+function getSupportedMessageEntities(message: SupportedChatMessage) {
+  if (Array.isArray(message.entities)) {
+    return message.entities;
+  }
+
+  if (Array.isArray(message.caption_entities)) {
+    return message.caption_entities;
+  }
+
+  return [];
+}
+
+function getSupportedMessageContentType(message: SupportedChatMessage) {
+  if (typeof message.text === "string") {
+    return "text";
+  }
+
+  if (Array.isArray(message.photo)) {
+    return "photo";
+  }
+
+  if (message.sticker) {
+    return "sticker";
+  }
+
+  return null;
+}
+
 function shouldHandleChatMessage(
-  bot: Bot,
+  bot: AppBot,
   messageText: string,
   chatType: string,
   entities: readonly MessageEntity[] = [],
@@ -38,6 +97,30 @@ function shouldHandleChatMessage(
   }
 
   return entities.some((entity) => {
+    if (entity.type === "mention") {
+      const mentionText = messageText.slice(entity.offset, entity.offset + entity.length);
+      return mentionText.toLowerCase() === `@${botInfo.username.toLowerCase()}`;
+    }
+
+    if (entity.type === "text_mention") {
+      return entity.user?.id === botInfo.id;
+    }
+
+    return false;
+  });
+}
+
+function hasDirectBotMention(
+  bot: AppBot,
+  messageText: string,
+  entities: readonly MessageEntity[] = []
+) {
+  const botInfo = bot.botInfo;
+  if (!botInfo) {
+    return false;
+  }
+
+  return entities.some((entity) => {
     if (entity.type === "text_mention") {
       return entity.user?.id === botInfo.id;
     }
@@ -51,7 +134,11 @@ function shouldHandleChatMessage(
   });
 }
 
-function stripBotMentions(bot: Bot, text: string, entities: readonly MessageEntity[] = []) {
+function stripBotMentions(
+  bot: AppBot,
+  text: string,
+  entities: readonly MessageEntity[] = []
+) {
   const botInfo = bot.botInfo;
   if (!botInfo || text.length === 0) {
     return text.trim();
@@ -88,17 +175,14 @@ function getThreadId(message: { message_thread_id?: number }) {
     : undefined;
 }
 
-function getCommandInput(text: string, command: string) {
-  const commandPattern = new RegExp(`^/${command}(?:@\\S+)?\\s*`, "i");
-  return text.replace(commandPattern, "").trim();
-}
-
 async function resolveChatConversation(options: {
   chatId: string;
   chatType: string;
   threadId: number | undefined;
   telegramMessageId: number;
   replyToTelegramMessageId: number | undefined;
+  startNewConversation?: boolean;
+  anchorConversationToMessageId?: number;
 }) {
   const {
     chatId,
@@ -106,8 +190,27 @@ async function resolveChatConversation(options: {
     threadId,
     telegramMessageId,
     replyToTelegramMessageId,
+    startNewConversation,
+    anchorConversationToMessageId,
   } = options;
   const baseConversationId = buildConversationId(chatId, chatType, threadId);
+
+  if (anchorConversationToMessageId != null) {
+    return {
+      conversationId: buildAnchoredConversationId(
+        baseConversationId,
+        anchorConversationToMessageId
+      ),
+      messageIdsToAssign: [telegramMessageId],
+    };
+  }
+
+  if (startNewConversation) {
+    return {
+      conversationId: buildAnchoredConversationId(baseConversationId, telegramMessageId),
+      messageIdsToAssign: [telegramMessageId],
+    };
+  }
 
   if (replyToTelegramMessageId == null) {
     return {
@@ -116,7 +219,7 @@ async function resolveChatConversation(options: {
     };
   }
 
-  const existingConversationId = await resolveConversationIdFromMessageHistory({
+  const history = await inspectMessageHistory({
     chatId,
     telegramMessageId: replyToTelegramMessageId,
     baseConversationId,
@@ -124,97 +227,76 @@ async function resolveChatConversation(options: {
   });
 
   const conversationId =
-    existingConversationId ??
+    history.conversationId ??
     buildAnchoredConversationId(baseConversationId, replyToTelegramMessageId);
 
   return {
     conversationId,
-    messageIdsToAssign: [replyToTelegramMessageId, telegramMessageId],
+    messageIdsToAssign: [...history.messageIds, telegramMessageId],
   };
 }
 
-export function setupChatHandler(bot: Bot) {
-  bot.command("chat", async (ctx) => {
-    const userInput = getCommandInput(ctx.msg.text, "chat");
-    if (!userInput) {
-      await ctx.reply("Please provide a message after /chat.");
+export function setupChatHandler(bot: AppBot) {
+  bot.on("message", async (ctx) => {
+    const message = ctx.msg as SupportedChatMessage;
+    const contentType = getSupportedMessageContentType(message);
+    if (contentType == null) {
       return;
     }
 
-    const chatId = String(ctx.chat.id);
-    const threadId = getThreadId(ctx.msg);
-    const baseConversationId = buildConversationId(chatId, ctx.chat.type, threadId);
-    const conversationId = buildAnchoredConversationId(
-      baseConversationId,
-      ctx.msg.message_id
-    );
-
-    try {
-      await assignConversationIdToMessages(
-        chatId,
-        [ctx.msg.message_id],
-        conversationId,
-        threadId
-      );
-
-      await enqueueChatTask({
-        conversationId,
-        chatId,
-        triggerTelegramMessageId: ctx.msg.message_id,
-        payload: {
-          text: ctx.msg.text,
-          userInput,
-          ...(threadId == null ? {} : { threadId }),
-          allowTaskActions: true,
-          updateId: ctx.update.update_id,
-        },
-        ...(ctx.from ? { userId: String(ctx.from.id) } : {}),
-      });
-    } catch (error) {
-      logError("CHAT_TASK_ENQUEUE", error, {
-        chatId: ctx.chat.id,
-        userId: ctx.from?.id,
-        updateId: ctx.update.update_id,
-      });
-      await ctx.reply("Failed to queue task.");
-    }
-  });
-
-  bot.on("message:text", async (ctx) => {
-    const entity = ctx.msg.entities?.[0];
+    const messageText = getSupportedMessageText(message);
+    const messageEntities = getSupportedMessageEntities(message);
+    const entity = messageEntities[0];
     if (entity?.type === "bot_command" && entity.offset === 0) {
       return;
     }
 
     const shouldHandle = shouldHandleChatMessage(
       bot,
-      ctx.msg.text,
+      messageText,
       ctx.chat.type,
-      ctx.msg.entities,
-      ctx.msg.reply_to_message?.from?.id
+      messageEntities,
+      message.reply_to_message?.from?.id
     );
     if (!shouldHandle) {
       return;
     }
 
     const chatId = String(ctx.chat.id);
-    const threadId = getThreadId(ctx.msg);
+    const threadId = getThreadId(message);
     const replyToTelegramMessageId =
-      typeof ctx.msg.reply_to_message?.message_id === "number"
-        ? ctx.msg.reply_to_message.message_id
+      typeof message.reply_to_message?.message_id === "number"
+        ? message.reply_to_message.message_id
         : undefined;
+    const directBotMention =
+      ctx.chat.type !== "private" &&
+      hasDirectBotMention(bot, messageText, messageEntities);
     const userInput =
       ctx.chat.type === "private"
-        ? ctx.msg.text.trim()
-        : stripBotMentions(bot, ctx.msg.text, ctx.msg.entities);
+        ? messageText.trim()
+        : stripBotMentions(bot, messageText, messageEntities);
+    const startNewConversation =
+      ctx.chat.type !== "private" &&
+      replyToTelegramMessageId == null &&
+      directBotMention;
+    const anchorConversationToMessageId =
+      ctx.chat.type !== "private" &&
+      directBotMention &&
+      replyToTelegramMessageId != null
+        ? replyToTelegramMessageId
+        : undefined;
 
     try {
       const { conversationId, messageIdsToAssign } = await resolveChatConversation({
         chatId,
         chatType: ctx.chat.type,
         threadId,
-        telegramMessageId: ctx.msg.message_id,
+        telegramMessageId: message.message_id,
         replyToTelegramMessageId,
+        ...(anchorConversationToMessageId == null
+          ? {}
+          : { anchorConversationToMessageId }),
+        ...(startNewConversation ? { startNewConversation: true } : {}),
       });
 
       await assignConversationIdToMessages(
@@ -227,9 +309,9 @@ export function setupChatHandler(bot: Bot) {
       await enqueueChatTask({
         conversationId,
         chatId,
-        triggerTelegramMessageId: ctx.msg.message_id,
+        triggerTelegramMessageId: message.message_id,
         payload: {
-          text: ctx.msg.text,
+          text: messageText,
           userInput,
           ...(threadId == null ? {} : { threadId }),
           allowTaskActions: true,

@@ -1,5 +1,5 @@
-import type { Api, RawApi } from "grammy";
 import type { ChatOpenAI } from "@langchain/openai";
+import type { AppApi } from "../bot/types.js";
 
 export const TASK_TYPES = ["chat"] as const;
 
@@ -43,6 +43,7 @@ export interface TaskContextMessage {
   chatTitle: string | null;
   contentType: string;
   textContent: string | null;
+  rawMessage: string | null;
   replyToTelegramMessageId: number | null;
   fromId: string | null;
   fromUsername: string | null;
@@ -76,11 +77,13 @@ export interface TaskRuntime {
 }
 
 export interface TaskDependencies {
-  api: Api<RawApi>;
+  api: AppApi;
   chatModel: ChatOpenAI;
   decisionModel: ChatOpenAI;
   taskRuntime: TaskRuntime;
   taskTimeoutMs: number;
+  chatContextLimit: number;
+  telegramMediaCacheDir: string;
 }
 
 export interface CancelTaskScope {

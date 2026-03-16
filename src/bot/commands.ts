@@ -10,10 +10,6 @@ export const botCommands: BotCommand[] = [
     description: "Check if the AI reply is working",
   },
   {
-    command: "chat",
-    description: "Start a new AI conversation",
-  },
-  {
     command: "cancel",
     description: "Cancel the current task",
   },

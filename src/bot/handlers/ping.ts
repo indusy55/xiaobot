@@ -1,6 +1,6 @@
-import type { Bot } from "grammy";
+import type { AppBot } from "../types.js";
 
-export function setupPingHandler(bot: Bot) {
+export function setupPingHandler(bot: AppBot) {
   bot.command('ping', (ctx) => {
     ctx.reply('pong🏓')
   })

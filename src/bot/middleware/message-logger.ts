@@ -1,7 +1,7 @@
-import type { Bot } from "grammy";
 import { logger } from "../../infra/logger/index.js";
+import type { AppBot } from "../types.js";
 
-export function setupMessageLoggerMiddleware(bot: Bot) {
+export function setupMessageLoggerMiddleware(bot: AppBot) {
   // Text messages
   bot.on("message:text", (ctx, next) => {
     const user = ctx.from;

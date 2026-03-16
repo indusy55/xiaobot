@@ -68,6 +68,66 @@ const envSchema = z.object({
     },
     z.string().url("OPENAI_BASE_URL must be a valid URL").optional()
   ),
+  SEARXNG_BASE_URL: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z.string().url("SEARXNG_BASE_URL must be a valid URL").optional()
+  ),
+  SEARXNG_LANGUAGE: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z.string().default("all")
+  ),
+  SEARXNG_SAFE_SEARCH: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("SEARXNG_SAFE_SEARCH must be an integer")
+      .min(0, "SEARXNG_SAFE_SEARCH must be at least 0")
+      .max(2, "SEARXNG_SAFE_SEARCH must be at most 2")
+      .default(0)
+  ),
+  SEARXNG_ENGINES: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z.string().optional()
+  ),
+  SEARXNG_CATEGORIES: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z.string().optional()
+  ),
   TASK_TIMEOUT_MS: z.preprocess(
     (value) => {
       if (typeof value !== "string" || value.trim().length === 0) {
@@ -82,6 +142,94 @@ const envSchema = z.object({
       .int("TASK_TIMEOUT_MS must be an integer")
       .positive("TASK_TIMEOUT_MS must be greater than 0")
       .default(120_000)
+  ),
+  CHAT_CONTEXT_LIMIT: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("CHAT_CONTEXT_LIMIT must be an integer")
+      .positive("CHAT_CONTEXT_LIMIT must be greater than 0")
+      .default(30)
+  ),
+  WEB_SEARCH_TIMEOUT_MS: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("WEB_SEARCH_TIMEOUT_MS must be an integer")
+      .positive("WEB_SEARCH_TIMEOUT_MS must be greater than 0")
+      .default(10_000)
+  ),
+  WEB_SEARCH_RESULT_LIMIT: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("WEB_SEARCH_RESULT_LIMIT must be an integer")
+      .min(1, "WEB_SEARCH_RESULT_LIMIT must be at least 1")
+      .max(10, "WEB_SEARCH_RESULT_LIMIT must be at most 10")
+      .default(5)
+  ),
+  WEBPAGE_READ_TIMEOUT_MS: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("WEBPAGE_READ_TIMEOUT_MS must be an integer")
+      .positive("WEBPAGE_READ_TIMEOUT_MS must be greater than 0")
+      .default(20_000)
+  ),
+  WEBPAGE_MAX_CONTENT_CHARS: z.preprocess(
+    (value) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        return undefined;
+      }
+
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? value : parsed;
+    },
+    z
+      .number()
+      .int("WEBPAGE_MAX_CONTENT_CHARS must be an integer")
+      .min(500, "WEBPAGE_MAX_CONTENT_CHARS must be at least 500")
+      .max(50_000, "WEBPAGE_MAX_CONTENT_CHARS must be at most 50000")
+      .default(12_000)
+  ),
+  TELEGRAM_MEDIA_CACHE_DIR: z.preprocess(
+    (value) => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      const trimmed = value.trim();
+      return trimmed.length === 0 ? undefined : trimmed;
+    },
+    z.string().default("data/media-cache")
   ),
 });
 
