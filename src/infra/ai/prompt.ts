@@ -11,20 +11,17 @@ const CHAT_STYLE_PROMPT_PATH = join(
   "prompts",
   "chat-style.md"
 );
-const CHAT_DECISION_PROMPT_PATH = join(
-  process.cwd(),
-  "prompts",
-  "chat-decision.md"
-);
-const CHAT_CAPABILITY_DECISION_PROMPT_PATH = join(
-  process.cwd(),
-  "prompts",
-  "chat-capability-decision.md"
-);
 
 let cachedPrompt: string | null = null;
-let cachedDecisionPrompt: string | null = null;
-let cachedCapabilityDecisionPrompt: string | null = null;
+
+const CHAT_RESPONSE_SYSTEM_GUIDANCE = [
+  "Response rules:",
+  "- Answer the latest user request with the context you were actually given.",
+  "- Use provided runtime context, search context, webpage context, and media context honestly.",
+  "- Do not pretend you read a webpage, opened a link, searched the web, or inspected media unless the current system context actually includes that result.",
+  "- If such content was not retrieved yet, say it was not retrieved yet instead of claiming it is impossible in principle.",
+  "- Do not make up facts that are missing from the provided context.",
+].join("\n");
 
 export async function readChatPrompt() {
   if (cachedPrompt != null) {
@@ -38,27 +35,8 @@ export async function readChatPrompt() {
 
   cachedPrompt = [rolePrompt.trim(), stylePrompt.trim()]
     .filter((part) => part.length > 0)
+    .concat(CHAT_RESPONSE_SYSTEM_GUIDANCE)
     .join("\n\n");
 
   return cachedPrompt;
-}
-
-export async function readChatDecisionPrompt() {
-  if (cachedDecisionPrompt != null) {
-    return cachedDecisionPrompt;
-  }
-
-  cachedDecisionPrompt = (await readFile(CHAT_DECISION_PROMPT_PATH, "utf8")).trim();
-  return cachedDecisionPrompt;
-}
-
-export async function readChatCapabilityDecisionPrompt() {
-  if (cachedCapabilityDecisionPrompt != null) {
-    return cachedCapabilityDecisionPrompt;
-  }
-
-  cachedCapabilityDecisionPrompt = (
-    await readFile(CHAT_CAPABILITY_DECISION_PROMPT_PATH, "utf8")
-  ).trim();
-  return cachedCapabilityDecisionPrompt;
 }

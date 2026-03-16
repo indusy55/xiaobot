@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildFallbackCapabilityDecision,
   buildChatDecisionMessages,
   sanitizeCapabilityDecision,
   sanitizeChatDecision,
@@ -11,7 +12,6 @@ describe("sanitizeWebSearchDecision", () => {
   it("falls back to the latest user query when the model omits one", () => {
     const decision = sanitizeWebSearchDecision(
       {
-        version: 1,
         shouldSearch: true,
         query: null,
         reason: "Need fresh info",
@@ -30,7 +30,6 @@ describe("sanitizeWebpageReadDecision", () => {
   it("keeps the selected url when it is in the candidate set", () => {
     const decision = sanitizeWebpageReadDecision(
       {
-        version: 1,
         shouldRead: true,
         url: "https://example.com/article",
         reason: "Need page content",
@@ -47,7 +46,6 @@ describe("sanitizeWebpageReadDecision", () => {
   it("disables webpage reading when the model selects an unknown url", () => {
     const decision = sanitizeWebpageReadDecision(
       {
-        version: 1,
         shouldRead: true,
         url: "https://evil.example.com",
         reason: "Need page content",
@@ -66,7 +64,6 @@ describe("sanitizeCapabilityDecision", () => {
   it("keeps a direct url only when it comes from the direct candidate set", () => {
     const decision = sanitizeCapabilityDecision(
       {
-        version: 1,
         shouldSearch: false,
         query: null,
         shouldReadWebpage: true,
@@ -88,7 +85,6 @@ describe("sanitizeCapabilityDecision", () => {
   it("disables search_result webpage reading when search is not enabled", () => {
     const decision = sanitizeCapabilityDecision(
       {
-        version: 1,
         shouldSearch: false,
         query: null,
         shouldReadWebpage: true,
@@ -107,11 +103,22 @@ describe("sanitizeCapabilityDecision", () => {
   });
 });
 
+describe("buildFallbackCapabilityDecision", () => {
+  it("falls back to direct webpage reading when a direct candidate url exists", () => {
+    const decision = buildFallbackCapabilityDecision({
+      directCandidateUrls: ["https://example.com/profile"],
+    });
+
+    expect(decision.shouldReadWebpage).toBe(true);
+    expect(decision.webpageReadMode).toBe("direct_url");
+    expect(decision.directUrl).toBe("https://example.com/profile");
+  });
+});
+
 describe("sanitizeChatDecision", () => {
   it("rejects reply targets outside the current conversation window", () => {
     const decision = sanitizeChatDecision(
       {
-        version: 1,
         action: "respond",
         replyMode: "reply_to_message",
         replyToMessageId: 999,
@@ -195,7 +202,6 @@ describe("sanitizeChatDecision", () => {
 describe("buildChatDecisionMessages", () => {
   it("only exposes reply candidates from the current conversation window", () => {
     const messages = buildChatDecisionMessages({
-      decisionPrompt: "test",
       runtimeContextPrompt: "runtime",
       conversationId: "chat:1:anchor:101",
       conversationMessages: [

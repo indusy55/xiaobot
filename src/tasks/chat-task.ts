@@ -13,6 +13,7 @@ import {
   buildReplyQuoteParameters,
   extractMessageQuote,
 } from "../bot/message-quote.js";
+import { extractUrlsFromRawMessage } from "../bot/message-url.js";
 import {
   buildTaskCancelKeyboard,
   buildTaskRetryKeyboard,
@@ -30,11 +31,7 @@ import {
   type ChatTaskAction,
   type WebpageCandidateUrl,
 } from "../infra/ai/decision.js";
-import {
-  readChatCapabilityDecisionPrompt,
-  readChatDecisionPrompt,
-  readChatPrompt,
-} from "../infra/ai/prompt.js";
+import { readChatPrompt } from "../infra/ai/prompt.js";
 import {
   buildConversationBacklogSummary,
 } from "../infra/ai/conversation-summary.js";
@@ -272,6 +269,10 @@ function collectWebpageCandidateUrls(options: {
     }
 
     for (const url of extractUrlsFromText(message.textContent)) {
+      pushCandidate(url, source);
+    }
+
+    for (const url of extractUrlsFromRawMessage(message.rawMessage)) {
       pushCandidate(url, source);
     }
   };
@@ -805,9 +806,7 @@ export class ChatTask extends BaseTask {
     } = options;
 
     try {
-      const decisionPrompt = await readChatDecisionPrompt();
       const decisionMessages = buildChatDecisionMessages({
-        decisionPrompt,
         runtimeContextPrompt,
         conversationId: this.record.conversationId,
         conversationMessages: contextMessages,
@@ -868,9 +867,7 @@ export class ChatTask extends BaseTask {
     } = options;
 
     try {
-      const capabilityDecisionPrompt = await readChatCapabilityDecisionPrompt();
       const decisionMessages = buildCapabilityDecisionMessages({
-        decisionPrompt: capabilityDecisionPrompt,
         runtimeContextPrompt,
         conversationId: this.record.conversationId,
         conversationMessages: contextMessages,
@@ -881,7 +878,7 @@ export class ChatTask extends BaseTask {
       });
       const decisionSignal = AbortSignal.any([
         signal,
-        AbortSignal.timeout(2500),
+        AbortSignal.timeout(10000),
       ]);
       const decisionMessage = await this.dependencies.decisionModel.invoke(
         decisionMessages,
@@ -902,7 +899,9 @@ export class ChatTask extends BaseTask {
         chatId: this.record.chatId,
       });
 
-      return buildFallbackCapabilityDecision();
+      return buildFallbackCapabilityDecision({
+        directCandidateUrls: directCandidateUrls.map((candidate) => candidate.url),
+      });
     }
   }
 

@@ -25,14 +25,12 @@ const enqueueTaskActionSchema = z.object({
 });
 
 export const webSearchDecisionSchema = z.object({
-  version: z.literal(1),
   shouldSearch: z.boolean(),
   query: z.string().max(256).nullable(),
   reason: z.string().max(200),
 });
 
 export const capabilityDecisionSchema = z.object({
-  version: z.literal(1),
   shouldSearch: z.boolean(),
   query: z.string().max(256).nullable(),
   shouldReadWebpage: z.boolean(),
@@ -42,14 +40,12 @@ export const capabilityDecisionSchema = z.object({
 });
 
 export const webpageReadDecisionSchema = z.object({
-  version: z.literal(1),
   shouldRead: z.boolean(),
   url: z.string().url().max(2048).nullable(),
   reason: z.string().max(200),
 });
 
 export const chatDecisionSchema = z.object({
-  version: z.literal(1),
   action: z.enum(["respond", "ignore"]),
   replyMode: z.enum(["reply_to_message", "send_message", "silent"]),
   replyToMessageId: z.number().int().positive().nullable(),
@@ -80,7 +76,6 @@ export interface WebpageCandidateUrl {
 }
 
 interface BuildDecisionMessagesOptions {
-  decisionPrompt: string;
   runtimeContextPrompt: string;
   conversationId: string;
   conversationMessages: TaskContextMessage[];
@@ -110,6 +105,55 @@ interface SanitizeCapabilityDecisionOptions {
 interface SanitizeWebpageReadDecisionOptions {
   candidateUrls: string[];
 }
+
+const CHAT_DECISION_SYSTEM_PROMPT = [
+  "Decide how the Telegram bot should react to the latest message.",
+  "Base the decision on the latest request and the provided chat context.",
+  "Be conservative in group chats and practical in private chats.",
+  "Do not invent message ids or user ids.",
+  "Return exactly one JSON object with these fields:",
+  "- action",
+  "- replyMode",
+  "- replyToMessageId",
+  "- targetUserId",
+  "- conversation",
+  "- taskActions",
+  "- responseBrief",
+  "- decisionNote",
+].join("\n");
+
+const CAPABILITY_DECISION_SYSTEM_PROMPT = [
+  "Decide which external capabilities should be used before the final reply.",
+  "Use capabilities only when they materially improve the answer.",
+  "Use search for web lookup or fresh public information.",
+  "Use webpage reading only when actual page contents are needed.",
+  "If a direct URL is already available and should be inspected, prefer direct_url.",
+  "Return exactly one JSON object with these fields:",
+  "- shouldSearch",
+  "- query",
+  "- shouldReadWebpage",
+  "- webpageReadMode",
+  "- directUrl",
+  "- reason",
+].join("\n");
+
+const WEB_SEARCH_DECISION_SYSTEM_PROMPT = [
+  "Decide whether web search is needed before the final reply.",
+  "Use search only when it materially improves the answer.",
+  "Return exactly one JSON object with these fields:",
+  "- shouldSearch",
+  "- query",
+  "- reason",
+].join("\n");
+
+const WEBPAGE_READ_DECISION_SYSTEM_PROMPT = [
+  "Decide whether a webpage should be read before the final reply.",
+  "Read a webpage only when its actual contents are needed.",
+  "Return exactly one JSON object with these fields:",
+  "- shouldRead",
+  "- url",
+  "- reason",
+].join("\n");
 
 function cleanValue(value: string | null | undefined) {
   if (typeof value !== "string") {
@@ -275,7 +319,6 @@ export function buildChatDecisionMessages(
   options: BuildDecisionMessagesOptions
 ): BaseMessage[] {
   const {
-    decisionPrompt,
     runtimeContextPrompt,
     conversationId,
     conversationMessages,
@@ -302,7 +345,7 @@ export function buildChatDecisionMessages(
   };
 
   return [
-    new SystemMessage(decisionPrompt),
+    new SystemMessage(CHAT_DECISION_SYSTEM_PROMPT),
     new SystemMessage(runtimeContextPrompt),
     new HumanMessage(
       `Decide the next Telegram bot action for the latest message.\nContext JSON:\n${JSON.stringify(
@@ -316,7 +359,6 @@ export function buildChatDecisionMessages(
 
 export function buildWebSearchDecisionMessages(options: BuildDecisionMessagesOptions) {
   const {
-    decisionPrompt,
     runtimeContextPrompt,
     conversationId,
     conversationMessages,
@@ -335,7 +377,7 @@ export function buildWebSearchDecisionMessages(options: BuildDecisionMessagesOpt
   };
 
   return [
-    new SystemMessage(decisionPrompt),
+    new SystemMessage(WEB_SEARCH_DECISION_SYSTEM_PROMPT),
     new SystemMessage(runtimeContextPrompt),
     new HumanMessage(
       `Decide whether web search is needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
@@ -353,7 +395,6 @@ export function buildCapabilityDecisionMessages(
   }
 ) {
   const {
-    decisionPrompt,
     runtimeContextPrompt,
     conversationId,
     conversationMessages,
@@ -374,7 +415,7 @@ export function buildCapabilityDecisionMessages(
   };
 
   return [
-    new SystemMessage(decisionPrompt),
+    new SystemMessage(CAPABILITY_DECISION_SYSTEM_PROMPT),
     new SystemMessage(runtimeContextPrompt),
     new HumanMessage(
       `Decide which external capabilities are needed before answering the latest message.\nContext JSON:\n${JSON.stringify(
@@ -392,7 +433,6 @@ export function buildWebpageReadDecisionMessages(
   }
 ) {
   const {
-    decisionPrompt,
     runtimeContextPrompt,
     conversationId,
     conversationMessages,
@@ -413,7 +453,7 @@ export function buildWebpageReadDecisionMessages(
   };
 
   return [
-    new SystemMessage(decisionPrompt),
+    new SystemMessage(WEBPAGE_READ_DECISION_SYSTEM_PROMPT),
     new SystemMessage(runtimeContextPrompt),
     new HumanMessage(
       `Decide whether a webpage should be read before answering the latest message.\nContext JSON:\n${JSON.stringify(
@@ -599,7 +639,6 @@ export function sanitizeWebpageReadDecision(
 
 export function buildFallbackChatDecision(triggerTelegramMessageId: number | null): ChatDecision {
   return {
-    version: 1,
     action: "respond",
     replyMode:
       triggerTelegramMessageId == null ? "send_message" : "reply_to_message",
@@ -625,7 +664,6 @@ export function buildFastPathChatDecision(options: {
     options.replyToMessageId ?? options.triggerTelegramMessageId;
 
   return {
-    version: 1 as const,
     action: "respond" as const,
     replyMode:
       replyToMessageId == null ? "send_message" as const : "reply_to_message" as const,
@@ -644,16 +682,30 @@ export function buildFastPathChatDecision(options: {
 
 export function buildFallbackWebSearchDecision(): WebSearchDecision {
   return {
-    version: 1,
     shouldSearch: false,
     query: null,
     reason: "Fallback decision",
   };
 }
 
-export function buildFallbackCapabilityDecision(): CapabilityDecision {
+export function buildFallbackCapabilityDecision(options?: {
+  directCandidateUrls?: string[];
+}): CapabilityDecision {
+  const directUrl =
+    options?.directCandidateUrls?.find((value) => cleanValue(value) != null) ?? null;
+
+  if (directUrl != null) {
+    return {
+      shouldSearch: false,
+      query: null,
+      shouldReadWebpage: true,
+      webpageReadMode: "direct_url",
+      directUrl,
+      reason: "Fallback direct URL decision",
+    };
+  }
+
   return {
-    version: 1,
     shouldSearch: false,
     query: null,
     shouldReadWebpage: false,
@@ -665,7 +717,6 @@ export function buildFallbackCapabilityDecision(): CapabilityDecision {
 
 export function buildFallbackWebpageReadDecision(): WebpageReadDecision {
   return {
-    version: 1,
     shouldRead: false,
     url: null,
     reason: "Fallback decision",
